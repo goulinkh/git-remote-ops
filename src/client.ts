@@ -1,3 +1,16 @@
+/**
+ * @module client
+ *
+ * High-level read-only Git remote client. {@link RemoteGit} composes the
+ * transport, protocol, and pack layers behind a small surface: discover a
+ * server, ask for commits/trees/blobs, get them back as decoded objects.
+ *
+ * The client caches:
+ *  - a single {@link ServerProfile} (capabilities + ref advertisement);
+ *  - every object materialized by any prior fetch, in a process-lifetime
+ *    map. Subsequent fetches dedupe wants against this map so multi-step
+ *    workflows (commit → tree → blob) only pay for what's new.
+ */
 import { Result } from "better-result";
 import type { GitRemoteOpsError } from "./errors.ts";
 import { ObjectDecodeError, ObjectNotFoundError, RefNotFoundError } from "./errors.ts";
@@ -22,6 +35,17 @@ import {
 } from "./protocol/index.ts";
 import { getSmartHttp, postUploadPack } from "./transport.ts";
 
+/**
+ * Capabilities offered on every v0 fetch unless overridden. `shallow` and
+ * `filter` are appended dynamically when the corresponding feature is in use.
+ *
+ * - `multi_ack`: lets the server send `ACK` continuations while we're
+ *   negotiating wants. Required by some servers even on a `done` short-circuit.
+ * - `side-band-64k`: turns on the channel-multiplexed response framing
+ *   ({@link demuxSideband} expects this).
+ * - `ofs-delta`: allows the more compact offset-based delta encoding.
+ * - `agent=…`: identification string, mirrored into v2's `agent=` header.
+ */
 const DEFAULT_CAPS = [
   "multi_ack",
   "side-band-64k",
@@ -41,6 +65,13 @@ function buildCaps(opts: { shallow?: boolean; filter?: boolean } = {}): string[]
   ];
 }
 
+/**
+ * Read-only Git remote client over smart HTTP.
+ *
+ * One instance corresponds to one upstream `url`. Reuse it across operations
+ * so the cached profile and object store can do their job; throw it away
+ * when you're done with that remote.
+ */
 export class RemoteGit {
   readonly url: string;
   readonly logger: Logger;
@@ -51,6 +82,13 @@ export class RemoteGit {
   private transportLogger: Logger;
   private packLogger: Logger;
 
+  /**
+   * @param url Base repository URL (e.g. `https://github.com/owner/repo.git`).
+   *   Trailing slashes are stripped.
+   * @param options Optional logger / diagnostic sink. When neither is given, a
+   *   silent logger is used. Passing `diagnostic` alone gets you a `debug`
+   *   logger routed to the diagnostic function.
+   */
   constructor(url: string, options?: RemoteGitOptions) {
     this.url = url.replace(/\/+$/, "");
     this.diagnostic = options?.diagnostic;
@@ -63,6 +101,14 @@ export class RemoteGit {
     this.packLogger = this.logger.child("pack");
   }
 
+  /**
+   * Fetch and cache the server's ref/capability advertisement.
+   *
+   * Issues both a v0/v1 GET and a v2 GET. The v0 response is the source of
+   * truth for refs and base capabilities; if the v2 response advertises
+   * `version=2`, those caps are merged in and `protocolVersion` flips to 2.
+   * Subsequent client calls hit the cached profile until `discover()` runs again.
+   */
   async discover(): Promise<Result<ServerProfile, GitRemoteOpsError>> {
     this.logger.info(`discover ${this.url}`);
     const response = await getSmartHttp(this.url, "/info/refs?service=git-upload-pack", {
@@ -99,6 +145,16 @@ export class RemoteGit {
     return Result.ok(this.profile);
   }
 
+  /**
+   * Confirm what the server *actually* honours, not just what it advertises.
+   *
+   * Some servers advertise `filter` but ignore it; others advertise `shallow`
+   * but reject deepen requests. We send minimal-cost shallow fetches with
+   * `blob:none` and `tree:0` filters and look at the returned pack to decide.
+   * Sets `supportsFilterBlobNone` / `supportsFilterTree0` on the cached profile.
+   *
+   * @param verbose Emit raw probe outcomes through {@link RemoteGitOptions.diagnostic}.
+   */
   async probe(verbose = false): Promise<Result<ServerProfile, GitRemoteOpsError>> {
     const profileResult = this.profile ? Result.ok(this.profile) : await this.discover();
     if (profileResult.isErr()) return fail(profileResult.error);
@@ -117,12 +173,20 @@ export class RemoteGit {
     return Result.ok(profile);
   }
 
+  /** Return a snapshot of the advertised refs (name → sha). Triggers `discover()` if needed. */
   async lsRefs(): Promise<Result<Map<string, string>, GitRemoteOpsError>> {
     const profile = this.profile ? Result.ok(this.profile) : await this.discover();
     if (profile.isErr()) return fail(profile.error);
     return Result.ok(new Map(profile.value.refs));
   }
 
+  /**
+   * Resolve `ref` to a 40-char hex sha against the cached advertisement.
+   *
+   * Tries the literal name, then `refs/heads/<ref>`, then `refs/tags/<ref>`.
+   * A 40-char hex input is accepted as-is even when it isn't in the ad — the
+   * server may still serve it as a `want`.
+   */
   async resolveRef(ref: string): Promise<Result<string, GitRemoteOpsError>> {
     const profile = this.profile ? Result.ok(this.profile) : await this.discover();
     if (profile.isErr()) return fail(profile.error);
@@ -138,6 +202,13 @@ export class RemoteGit {
     return fail(new RefNotFoundError({ ref, message: `ref not found: ${ref}` }));
   }
 
+  /**
+   * Fetch and decode a single commit reachable from `ref`.
+   *
+   * `options.depth` defaults to deep fetch; pass `1` for a snapshot. Filters
+   * are silently dropped if the server doesn't support them — we log an
+   * info-level message in that case.
+   */
   async fetchCommit(
     ref: string,
     options: FetchCommitOptions = {},
@@ -181,6 +252,7 @@ export class RemoteGit {
     return Result.ok({ commit: commit.value, sha: commitSha.value });
   }
 
+  /** Fetch a blob by sha and return its raw contents. */
   async fetchBlob(sha: string): Promise<Result<Uint8Array, GitRemoteOpsError>> {
     const profile = this.profile ? Result.ok(this.profile) : await this.discover();
     if (profile.isErr()) return fail(profile.error);
@@ -201,6 +273,13 @@ export class RemoteGit {
     return Result.ok(object.value.content);
   }
 
+  /**
+   * Fetch the commit at `ref` *and* its root tree from a single snapshot pack.
+   *
+   * Forces `parseFull: true` so the tree object — which the commit references
+   * but doesn't `want` directly — ends up in the local object store. Useful
+   * for "list files at HEAD" without a clone.
+   */
   async fetchTreeForCommit(
     ref: string,
     options: FetchCommitOptions = {},
@@ -237,6 +316,7 @@ export class RemoteGit {
     });
   }
 
+  /** Fetch and decode a single tree by sha. */
   async fetchTree(sha: string): Promise<Result<TreeEntry[], GitRemoteOpsError>> {
     const profile = this.profile ? Result.ok(this.profile) : await this.discover();
     if (profile.isErr()) return fail(profile.error);
@@ -259,6 +339,7 @@ export class RemoteGit {
     return Result.ok(tree.value);
   }
 
+  /** Look up an already-materialized object by sha. Does not fetch on miss. */
   getObject(sha: string): GitObject | undefined {
     return this.objects.get(sha);
   }

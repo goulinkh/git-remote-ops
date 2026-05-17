@@ -1,5 +1,17 @@
+/**
+ * @module logger
+ *
+ * A tiny levelled logger with namespaced children, optional ANSI colour, and
+ * cumulative metrics for HTTP and pack-parsing activity.
+ *
+ * Output goes to a configurable sink (defaults to `console.error`). Levels
+ * stack: `info ⊂ debug ⊂ trace`. The library never logs above `info` unless
+ * `--verbose` / `--debug` is set on the CLI or the caller passes its own
+ * configured logger.
+ */
 export type LogLevel = "silent" | "info" | "debug" | "trace";
 
+/** Numeric ranking — higher means "more verbose". Used for level comparison. */
 const LEVEL_RANK: Record<LogLevel, number> = {
   silent: 0,
   info: 1,
@@ -7,6 +19,7 @@ const LEVEL_RANK: Record<LogLevel, number> = {
   trace: 3,
 };
 
+/** ANSI escape codes. Disabled when stderr isn't a TTY or `NO_COLOR` is set. */
 const ANSI = {
   reset: "\x1b[0m",
   dim: "\x1b[2m",
@@ -20,6 +33,7 @@ const ANSI = {
   gray: "\x1b[90m",
 };
 
+/** Per-level colour token. `silent` has none — it never emits. */
 const LEVEL_COLOR: Record<Exclude<LogLevel, "silent">, string> = {
   info: ANSI.cyan,
   debug: ANSI.blue,
@@ -67,6 +81,7 @@ function detectColor(): boolean {
   }
 }
 
+/** Pretty-print a byte count with binary-prefix units. */
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n}B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
@@ -74,6 +89,7 @@ export function formatBytes(n: number): string {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)}GB`;
 }
 
+/** Pretty-print a millisecond duration, scaling unit to magnitude. */
 export function formatDuration(ms: number): string {
   if (ms < 1) return `${ms.toFixed(2)}ms`;
   if (ms < 1000) return `${ms.toFixed(1)}ms`;
@@ -83,6 +99,13 @@ export function formatDuration(ms: number): string {
   return `${min}m${s}s`;
 }
 
+/**
+ * Levelled logger with namespaced children and shared metrics.
+ *
+ * Children share their parent's `metrics` object so that any `recordHttp` /
+ * `recordPack` call anywhere in the tree contributes to the same totals
+ * surfaced by {@link Logger.summary}.
+ */
 export class Logger {
   readonly level: LogLevel;
   readonly metrics: Metrics;
@@ -104,6 +127,7 @@ export class Logger {
     this.epoch = performance.now();
   }
 
+  /** Spawn a logger that prefixes its messages with `parent.namespace + "." + namespace`. */
   child(namespace: string): Logger {
     const ns = this.namespace ? `${this.namespace}.${namespace}` : namespace;
     const c = new Logger({
@@ -139,12 +163,15 @@ export class Logger {
     this.sink(parts.join(" "));
   }
 
+  /** Emit at `info`. No-op if level is `silent`. */
   info(message: string): void {
     this.emit("info", message);
   }
+  /** Emit at `debug`. No-op unless level ≥ `debug`. */
   debug(message: string): void {
     this.emit("debug", message);
   }
+  /** Emit at `trace`. No-op unless level is `trace`. */
   trace(message: string): void {
     this.emit("trace", message);
   }
@@ -167,6 +194,7 @@ export class Logger {
     }
   }
 
+  /** Add one HTTP request's totals to {@link Logger.metrics}. */
   recordHttp(opts: { bytesIn: number; bytesOut: number; durationMs: number }): void {
     if (!this.collect) return;
     this.metrics.httpRequests++;
@@ -175,6 +203,7 @@ export class Logger {
     this.metrics.httpDurationMs += opts.durationMs;
   }
 
+  /** Add one parsed pack's totals to {@link Logger.metrics}. */
   recordPack(opts: {
     bytes: number;
     durationMs: number;
@@ -189,6 +218,7 @@ export class Logger {
     }
   }
 
+  /** Render an aligned multi-line table of {@link Logger.metrics}. CLI uses this for `--stats`. */
   summary(): string {
     const m = this.metrics;
     const bold = (s: string) => this.paint(s, ANSI.bold);
@@ -222,4 +252,5 @@ export class Logger {
   }
 }
 
+/** Shared no-op logger. Use as a default when callers don't pass one in. */
 export const NULL_LOGGER = new Logger({ level: "silent", collectMetrics: false });

@@ -1,16 +1,45 @@
+/**
+ * @module pack-delta
+ *
+ * Pack format varint decoders and the Git delta reconstruction routine.
+ *
+ * Two varint flavours live in pack files. The "big-endian" form used by
+ * `OBJ_OFS_DELTA` headers is decoded by {@link readVarintBe}; the
+ * little-endian form used inside the delta opcode stream is handled inline
+ * by {@link applyDelta}.
+ *
+ * Delta format spec: https://git-scm.com/docs/pack-format#_deltified_representation
+ */
 import { Result } from "better-result";
 import { PackParseError } from "../errors.ts";
 import type { ReadResult } from "../types.ts";
 import { VARINT_CONTINUE, VARINT_VALUE_MASK } from "./objects.ts";
 
+/** Bits of payload per varint byte. */
 const VARINT_VALUE_BITS = 7;
 
+/** High bit on a delta opcode byte → COPY instruction; otherwise INSERT. */
 const DELTA_COPY_FLAG = 0x80;
+/** Up to 4 bytes encode the copy offset (one per set bit in opcode low nibble). */
 const DELTA_COPY_OFFSET_BYTES = 4;
+/** Up to 3 bytes encode the copy size (one per set bit in opcode high nibble). */
 const DELTA_COPY_SIZE_BYTES = 3;
+/** Bit position of the first copy-size selector inside the opcode byte. */
 const DELTA_COPY_SIZE_SHIFT = 4;
+/** Special case: a copy with all size bytes absent means "copy 64 KiB". */
 const DELTA_DEFAULT_COPY_SIZE = 0x10000;
 
+/**
+ * Decode Git's "offset-encoded" big-endian varint (used for `OBJ_OFS_DELTA`
+ * base offsets).
+ *
+ * Each continuation byte adds an implicit `+1` before shifting, which lets the
+ * encoding represent more values in the same number of bytes than a plain MSB
+ * varint would.
+ *
+ * @returns `{ value, offset }` where `offset` points just past the last byte
+ *   consumed, or {@link PackParseError} if the buffer ends mid-varint.
+ */
 export function readVarintBe(
   data: Uint8Array,
   offset: number,
@@ -44,6 +73,24 @@ export function readVarintBe(
   return Result.ok({ value, offset });
 }
 
+/**
+ * Reconstruct an object body from a delta against `base`.
+ *
+ * The delta stream begins with two little-endian varints (source size, target
+ * size). Then a sequence of opcodes follows, each either:
+ *
+ *  - **COPY** (high bit set): copy a range from `base` into the output. The
+ *    low nibble's set bits select which of up to 4 offset bytes follow; the
+ *    next 3 bits select up to 3 size bytes. A size of 0 means 64 KiB.
+ *  - **INSERT** (high bit clear, opcode `1..0x7f`): emit the next `opcode`
+ *    bytes of the delta stream verbatim into the output.
+ *  - opcode `0` is reserved and invalid.
+ *
+ * The source size is validated implicitly by every COPY's bounds check.
+ *
+ * @returns The fully reconstructed object, or {@link PackParseError} on any
+ *   truncation, invalid opcode, or size mismatch.
+ */
 export function applyDelta(
   base: Uint8Array,
   delta: Uint8Array,

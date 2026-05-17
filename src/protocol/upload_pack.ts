@@ -1,3 +1,13 @@
+/**
+ * @module upload-pack
+ *
+ * Build `git-upload-pack` request bodies (protocol v0 and v2) and demux the
+ * sideband-multiplexed response back into a raw packfile.
+ *
+ * Sideband framing: each data pkt-line is prefixed by a single byte channel
+ * marker — `1` packfile bytes, `2` human-readable progress, `3` fatal error
+ * text. The packfile itself is the concatenation of all channel-1 payloads.
+ */
 import { Result } from "better-result";
 import { PktLineError, UploadPackError } from "../errors.ts";
 import { PACK_SIGNATURE } from "../pack/objects.ts";
@@ -7,10 +17,18 @@ import { DELIM_PKT, FLUSH_PKT, parsePktLines, pktLine } from "./pkt_line.ts";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+/** Sideband channel for packfile bytes. */
 const BAND_PACK = 1;
+/** Sideband channel for human-readable progress messages. */
 const BAND_PROGRESS = 2;
+/** Sideband channel for fatal error text. */
 const BAND_ERROR = 3;
 
+/**
+ * Pkt-line payload prefixes that mark control / framing lines, not packfile
+ * data. Used to skip past the v2 section headers (`packfile\n` etc.) when
+ * hunting for the first real data line.
+ */
 const CONTROL_PREFIXES = [
   "version 2",
   "shallow-info",
@@ -21,6 +39,7 @@ const CONTROL_PREFIXES = [
   "NAK",
   "ACK",
 ];
+/** Bytes of payload to peek at when matching against {@link CONTROL_PREFIXES}. */
 const CONTROL_PREFIX_PEEK = 16;
 
 function concat(parts: Uint8Array[]): Uint8Array {
@@ -34,6 +53,13 @@ function concat(parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
+/**
+ * Build the POST body for `/git-upload-pack`. Dispatches to a v0 or v2 encoder
+ * based on `options.protocolVersion` (defaults to v0).
+ *
+ * @returns Encoded request bytes, or {@link PktLineError} if any inner frame
+ *   exceeds the pkt-line size cap.
+ */
 export function buildFetchRequest(
   options: FetchRequestOptions,
 ): Result<Uint8Array, PktLineError> {
@@ -42,6 +68,11 @@ export function buildFetchRequest(
     : buildV0FetchRequest(options);
 }
 
+/**
+ * Encode a v0 fetch request: one `want <sha>` per oid (capabilities ride on
+ * the first `want` line, space-separated after the sha), optional `deepen`
+ * and `filter` lines, a flush, then `done`.
+ */
 function buildV0FetchRequest(
   options: FetchRequestOptions,
 ): Result<Uint8Array, PktLineError> {
@@ -70,6 +101,12 @@ function buildV0FetchRequest(
   return Result.ok(concat(lines));
 }
 
+/**
+ * Encode a v2 fetch command. Header section carries `command=fetch` and an
+ * `agent=` string, separated from the argument section by a delim packet.
+ * The argument section lists transport hints (`thin-pack`, `ofs-delta`),
+ * `want` lines, optional `deepen`/`filter`, then `done` and a flush.
+ */
 function buildV2FetchRequest(
   options: FetchRequestOptions,
 ): Result<Uint8Array, PktLineError> {
@@ -106,6 +143,14 @@ function buildV2FetchRequest(
   return Result.ok(concat(lines));
 }
 
+/**
+ * Demultiplex sideband-framed `git-upload-pack` response bytes into three
+ * channel-segregated streams (pack / progress / errors). All payloads from a
+ * given channel are concatenated in order.
+ *
+ * Inputs that lack a sideband framing byte are dropped — callers needing the
+ * non-sideband path should use {@link extractPack}.
+ */
 export function demuxSideband(body: Uint8Array): Result<SidebandData, PktLineError> {
   const packChunks: Uint8Array[] = [];
   const progressChunks: Uint8Array[] = [];
@@ -162,6 +207,19 @@ function findFirstDataPktLine(
   );
 }
 
+/**
+ * Pull the packfile bytes out of a `git-upload-pack` response.
+ *
+ * Walks pkt-lines until it finds the first non-control data line and then
+ * picks the right strategy:
+ *
+ *  1. raw `PACK` signature inline — slice from there to end-of-buffer;
+ *  2. sideband byte (1/2/3) prefix — demux and return channel 1;
+ *  3. no framed data at all — fall back to a byte-level `PACK` search.
+ *
+ * @param response Raw HTTP response body.
+ * @param diagnostic Optional sink for non-fatal server stderr (channel 3).
+ */
 export function extractPack(
   response: Uint8Array,
   diagnostic?: DiagnosticFn,

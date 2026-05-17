@@ -1,10 +1,25 @@
+/**
+ * @module transport
+ *
+ * Thin `fetch` wrappers for the two HTTP endpoints the smart-HTTP Git
+ * protocol uses:
+ *
+ *  - `GET <repo>/info/refs?service=git-upload-pack` — capability/ref ad.
+ *  - `POST <repo>/git-upload-pack` — the actual fetch request, body framed
+ *    by the protocol layer.
+ *
+ * Both helpers turn errors into {@link TransportError} (never throw) and
+ * record timing / byte counts onto the supplied {@link Logger}.
+ */
 import { Result } from "better-result";
 import { TransportError } from "./errors.ts";
 import { Logger, NULL_LOGGER } from "./logger.ts";
 import type { GitProtocolOptions, HttpTransportResponse } from "./types.ts";
 
+/** Sent verbatim as `User-Agent`. Git servers sometimes log this. */
 const USER_AGENT = "git/2.0 (git-remote-ops-deno)";
 
+/** Per-request transport context: protocol version + optional logger. */
 export interface TransportContext extends GitProtocolOptions {
   logger?: Logger;
 }
@@ -50,6 +65,11 @@ async function readResponse(
   });
 }
 
+/**
+ * Issue a smart-HTTP GET to `${url}${path}`. Used to fetch the ref/capability
+ * advertisement. When `protocolVersion === 2`, sends `Git-Protocol: version=2`
+ * so the server responds with a v2 capability ad instead of the legacy format.
+ */
 export async function getSmartHttp(
   url: string,
   path: string,
@@ -86,6 +106,14 @@ export async function getSmartHttp(
   return read;
 }
 
+/**
+ * POST a `git-upload-pack` request body. Sets the magic content/accept types
+ * the upload-pack service expects and forwards the response bytes as-is for
+ * the protocol layer to demux.
+ *
+ * `Connection: close` is set explicitly because some servers (notably
+ * `dumb-http-bridge` setups) hang on keep-alive.
+ */
 export async function postUploadPack(
   url: string,
   body: Uint8Array,

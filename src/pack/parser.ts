@@ -1,3 +1,23 @@
+/**
+ * @module pack-parser
+ *
+ * Decode an in-memory packfile into a `sha → GitObject` map.
+ *
+ * The parser handles the four loose-object types directly and resolves both
+ * delta encodings (`OBJ_OFS_DELTA`, `OBJ_REF_DELTA`) by applying
+ * {@link applyDelta} against bases discovered earlier in the same pack. Ref
+ * deltas whose bases haven't appeared yet are deferred and retried in fixed
+ * point until every delta resolves or progress stalls.
+ *
+ * Optimization: passing a `targets` set lets the parser bail out as soon as
+ * every requested SHA has been materialized — useful for "fetch one object"
+ * paths where the server may have sent a much larger pack.
+ *
+ * zlib note: we reach into `node:zlib`'s `_processChunk` to learn exactly how
+ * many compressed input bytes were consumed. The public Streams API doesn't
+ * expose that, and parsing the next object requires knowing where the current
+ * one's compressed run ends.
+ */
 import { Result } from "better-result";
 import zlib from "node:zlib";
 import { Buffer } from "node:buffer";
@@ -26,14 +46,22 @@ import {
   VARINT_VALUE_MASK,
 } from "./objects.ts";
 
+/** Mask for the 3-bit object type field in the first header byte. */
 const TYPE_FIELD_MASK = 0x07;
+/** Shift to bring the type field into the low bits. */
 const TYPE_FIELD_SHIFT = 4;
+/** Mask for the size bits in the first header byte (bottom 4 bits). */
 const SIZE_LOW_NIBBLE_MASK = 0x0f;
+/** Bit width of those size bits. */
 const SIZE_LOW_NIBBLE_BITS = 4;
+/** Bit width of each subsequent varint byte's payload. */
 const VARINT_VALUE_BITS = 7;
 
+/** Raw 20-byte SHA-1 inline-prefixed on every `OBJ_REF_DELTA`. */
 const REF_DELTA_SHA_SIZE = 20;
+/** Offset of the big-endian pack version word inside the 12-byte header. */
 const VERSION_OFFSET = 4;
+/** Offset of the big-endian object count word inside the 12-byte header. */
 const COUNT_OFFSET = 8;
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -61,6 +89,13 @@ interface RefDelta {
   delta: Uint8Array;
 }
 
+/**
+ * Decode a single pack-entry header starting at `offset`.
+ *
+ * Format: one byte holds `[MSB | type:3 | size_lo:4]`. While MSB is set,
+ * each additional byte contributes 7 more size bits. Returns the parsed
+ * type code, uncompressed size, and the offset just past the header.
+ */
 export function readPackObjectHeader(
   data: Uint8Array,
   offset: number,
@@ -101,6 +136,19 @@ interface InflateEngine {
   close(): void;
 }
 
+/**
+ * Inflate one zlib stream embedded in the pack at `offset`.
+ *
+ * The pack's 20-byte trailer is sliced off before inflation so the deflate
+ * engine never sees it. `bytesWritten` on the `Inflate` engine reports how
+ * many input bytes were consumed, which is the only reliable way to advance
+ * `offset` to the next entry — multiple deflate streams sit back-to-back
+ * inside the pack and there's no length prefix at this layer.
+ *
+ * @param expectedSize Uncompressed size reported by the object header. When
+ *   provided, used to right-size the inflate chunk buffer and to assert the
+ *   output length post-hoc.
+ */
 export function decompressAt(
   data: Uint8Array,
   offset: number,
@@ -142,6 +190,20 @@ export function decompressAt(
   return Result.ok({ value, offset: offset + consumed });
 }
 
+/**
+ * Walk every entry in `pack` and return a map of resolved objects keyed by
+ * SHA-1.
+ *
+ * For non-delta entries, the inflated bytes are hashed and stored. For
+ * `OBJ_OFS_DELTA` the base is looked up via `byOffset` (always present, since
+ * pack ordering guarantees the base appears earlier in the stream). For
+ * `OBJ_REF_DELTA` the base may be either earlier or later — unresolved ones
+ * accumulate in `pendingRefDeltas` and are retried until either all resolve
+ * or a pass makes no progress (cyclic / out-of-pack reference).
+ *
+ * @param targets Optional set of "wanted" SHAs. If supplied, the parser
+ *   returns as soon as every target has been materialized — even mid-pack.
+ */
 export function parsePackfile(
   pack: Uint8Array,
   targets?: ReadonlySet<string>,

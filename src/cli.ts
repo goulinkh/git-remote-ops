@@ -1,11 +1,29 @@
 #!/usr/bin/env -S deno run --allow-net
+/**
+ * @module cli
+ *
+ * Cliffy-driven command-line front-end. Each subcommand wires the global
+ * verbosity / stats flags into a freshly built {@link RemoteGit}, executes
+ * one operation, and prints a plain-text result to stdout. Errors come back
+ * through {@link unwrap} as `[Tag] message` lines on stderr with exit 1.
+ *
+ * Subcommands:
+ *  - `probe`       — capability + filter probe
+ *  - `ls-refs`     — list advertised refs
+ *  - `cat-commit`  — fetch one commit
+ *  - `cat-tree`    — fetch a commit's root tree (or a tree by sha)
+ *  - `list-files`  — walk a snapshot and emit every file path
+ *  - `cat-blob`    — pipe one blob's raw bytes to stdout
+ */
 import { Command, ValidationError } from "@cliffy/command";
 import type { Result } from "better-result";
 import { Logger, RemoteGit } from "./index.ts";
 import type { GitRemoteOpsError, LogLevel, TreeEntry } from "./index.ts";
 import { parseTree } from "./objects/index.ts";
 
+/** Bumped in lockstep with `deno.json`. Surfaced by `git-remote-ops --version`. */
 const VERSION = "0.1.0";
+/** Octal mode of a subtree entry — used to recurse during `list-files`. */
 const TREE_MODE = "40000";
 
 interface GlobalFlags {

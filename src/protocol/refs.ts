@@ -1,3 +1,14 @@
+/**
+ * @module refs
+ *
+ * Decoders for the two flavours of `info/refs` response Git can return for the
+ * `git-upload-pack` service:
+ *
+ *  - **Protocol v0/v1** — a flat stream of `<sha> <ref>` pkt-lines where the
+ *    first ref also carries a NUL-separated capability list.
+ *  - **Protocol v2** — a capability advertisement (`version 2`, then one
+ *    `key[=args]` pkt-line per capability).
+ */
 import { Result } from "better-result";
 import type { PktLineError } from "../errors.ts";
 import type { ParsedRefAdvertisement } from "../types.ts";
@@ -5,15 +16,31 @@ import { parsePktLines } from "./pkt_line.ts";
 
 const decoder = new TextDecoder();
 
-const COMMENT_LINE = 0x23; // '#'
+/** ASCII `'#'` — leading byte of the optional `# service=...` banner line. */
+const COMMENT_LINE = 0x23;
+/** ASCII space separating sha from ref name. */
 const SPACE = 0x20;
+/** ASCII line-feed — trailing terminator on most advertisement lines. */
 const LF = 0x0a;
+/** Hex-encoded SHA-1 is always 40 chars. */
 const SHA_LENGTH = 40;
 
 function stripTrailingLf(payload: Uint8Array): Uint8Array {
   return payload.at(-1) === LF ? payload.subarray(0, payload.length - 1) : payload;
 }
 
+/**
+ * Parse a v0/v1 ref advertisement (response body of
+ * `GET /info/refs?service=git-upload-pack`).
+ *
+ * The first non-comment data line is special: its payload contains the ref
+ * pair, a NUL byte, then a space-separated list of capabilities. Subsequent
+ * lines are plain `<sha> <ref>\n` pairs.
+ *
+ * @param body Raw response bytes (including any `# service=...` banner).
+ * @returns The advertised refs (name → sha) and capabilities, or
+ *   {@link PktLineError} if the pkt-line framing is malformed.
+ */
 export function parseRefAdvertisement(
   body: Uint8Array,
 ): Result<ParsedRefAdvertisement, PktLineError> {
@@ -50,6 +77,17 @@ export function parseRefAdvertisement(
   return Result.ok({ refs, capabilities });
 }
 
+/**
+ * Parse a v2 capability advertisement.
+ *
+ * The first data line is always `version 2`; we encode that as the synthetic
+ * capability `"version=2"` so callers can detect protocol v2 with a single
+ * lookup. For the `fetch` capability, any space-separated arguments (e.g.
+ * `shallow`, `filter`, `wait-for-done`) are added as separate set entries.
+ *
+ * @param body Raw response bytes from the `git-upload-pack` advertisement.
+ * @returns Set of capability tokens, or {@link PktLineError} on bad framing.
+ */
 export function parseV2CapabilityAdvertisement(
   body: Uint8Array,
 ): Result<Set<string>, PktLineError> {

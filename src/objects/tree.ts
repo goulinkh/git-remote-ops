@@ -1,3 +1,13 @@
+/**
+ * @module objects-tree
+ *
+ * Tree decoder and helpers for walking trees / resolving paths to blobs.
+ *
+ * A tree entry on disk is `<octal-mode> <name>\0<20-byte-sha>` with no length
+ * prefix; entries are concatenated. Subtrees use mode `"40000"`; everything
+ * else (regular files, executable files, symlinks, gitlinks) is treated as a
+ * leaf by {@link walkTree}.
+ */
 import { Result } from "better-result";
 import { encodeHex } from "@std/encoding/hex";
 import { ObjectDecodeError, PathNotFoundError } from "../errors.ts";
@@ -9,13 +19,23 @@ interface FileEntry {
   sha: string;
 }
 
+/** Octal mode marker for a subtree entry. */
 const TREE_MODE = "40000";
+/** ASCII space — separates mode from name. */
 const SPACE = 0x20;
+/** ASCII NUL — terminates the name field. */
 const NUL = 0x00;
+/** Raw SHA-1 width in bytes. */
 const SHA_BYTES = 20;
 
 const decoder = new TextDecoder();
 
+/**
+ * Parse a tree body into its entries, in the order they appear on disk.
+ *
+ * @param content Uncompressed tree bytes (no `tree <size>\0` header).
+ * @returns Ordered entries, or {@link ObjectDecodeError} on a malformed entry.
+ */
 export function parseTree(content: Uint8Array): Result<TreeEntry[], ObjectDecodeError> {
   const entries: TreeEntry[] = [];
   let offset = 0;
@@ -50,6 +70,16 @@ export function parseTree(content: Uint8Array): Result<TreeEntry[], ObjectDecode
   return Result.ok(entries);
 }
 
+/**
+ * Recursively flatten a tree into its leaf entries.
+ *
+ * Subtrees are followed; every other mode is treated as a file and emitted
+ * with its full path joined from `pathPrefix`. Requires that every reachable
+ * tree object is already present in `objects` — typically the case after a
+ * full (unfiltered) snapshot fetch.
+ *
+ * @param pathPrefix Internal: prefix prepended to entry names while recursing.
+ */
 export function walkTree(
   objects: GitObjectMap,
   treeSha: string,
@@ -84,6 +114,16 @@ export function walkTree(
   return Result.ok(files);
 }
 
+/**
+ * Resolve a slash-separated path inside a tree to the SHA of its leaf entry
+ * (usually a blob).
+ *
+ * Intermediate components must be subtrees; the final component may be any
+ * mode (blob, exec, symlink). Leading/trailing/duplicate slashes are tolerated.
+ *
+ * @returns Leaf SHA-1, or {@link PathNotFoundError} when any component is
+ *   missing or an intermediate component is not a tree.
+ */
 export function resolvePathToBlob(
   objects: GitObjectMap,
   treeSha: string,
