@@ -22,7 +22,7 @@ import type { GitRemoteOpsError, LogLevel, TreeEntry } from "./index.js";
 import { parseTree } from "./objects/index.js";
 
 /** Bumped in lockstep with `package.json`. Surfaced by `git-remote-ops --version`. */
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 /** Octal mode of a subtree entry — used to recurse during `list-files`. */
 const TREE_MODE = "40000";
 

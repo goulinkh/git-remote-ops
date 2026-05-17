@@ -1,6 +1,6 @@
 {
   "name": "git-remote-ops",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Read-only Git over smart HTTP. No clone, no subprocess.",
   "license": "MIT",
   "author": "Goulin Khoge",
