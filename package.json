@@ -1,0 +1,69 @@
+{
+  "name": "git-remote-ops",
+  "version": "0.1.0",
+  "description": "Read-only Git over smart HTTP. No clone, no subprocess.",
+  "license": "MIT",
+  "author": "Goulin Khoge",
+  "type": "module",
+  "packageManager": "pnpm@10.6.2",
+  "engines": {
+    "node": ">=24"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/goulinkh/git-remote-ops.git"
+  },
+  "bugs": {
+    "url": "https://github.com/goulinkh/git-remote-ops/issues"
+  },
+  "homepage": "https://github.com/goulinkh/git-remote-ops#readme",
+  "keywords": [
+    "git",
+    "smart-http",
+    "upload-pack",
+    "packfile",
+    "partial-clone",
+    "shallow-clone"
+  ],
+  "bin": {
+    "git-remote-ops": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "AGENTS.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --import tsx --test src/*.test.ts src/objects/*.test.ts src/pack/*.test.ts src/protocol/*.test.ts",
+    "test:integration": "node --import tsx --test src/testing/integration/*.test.ts",
+    "test:all": "pnpm test && pnpm test:integration",
+    "verify": "pnpm typecheck && pnpm test"
+  },
+  "dependencies": {
+    "better-result": "^2.0.0",
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

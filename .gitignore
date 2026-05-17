@@ -1,7 +1,6 @@
-
-.deno/
+node_modules/
+dist/
 coverage/
 *.log
 tmp/
 .DS_Store
-npm/
