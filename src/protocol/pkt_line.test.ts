@@ -17,7 +17,7 @@ describe("parsePktLines", () => {
     if (result.isErr()) throw result.error;
     assertEquals(
       result.value.map((line) => line.payload && new TextDecoder().decode(line.payload)),
-      ["hi", null],
+      ["hi\n", null],
     );
   });
 });

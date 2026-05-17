@@ -5,8 +5,6 @@ import type { PktLine } from "../types.ts";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-const LF = 0x0a;
-
 const PKT_LENGTH_PREFIX_SIZE = 4;
 const PKT_LENGTH_HEX_BASE = 16;
 const MAX_PKT_LINE_LENGTH = 0xffff;
@@ -76,10 +74,7 @@ export function parsePktLines(
         }),
       );
     }
-    let payload = buf.subarray(offset + PKT_LENGTH_PREFIX_SIZE, offset + length);
-    if (payload.at(-1) === LF) {
-      payload = payload.subarray(0, payload.length - 1);
-    }
+    const payload = buf.subarray(offset + PKT_LENGTH_PREFIX_SIZE, offset + length);
     offset += length;
     lines.push({ offset, payload });
   }
