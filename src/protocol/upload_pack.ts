@@ -2,7 +2,7 @@ import { Result } from "better-result";
 import { PktLineError, UploadPackError } from "../errors.ts";
 import { PACK_SIGNATURE } from "../pack/objects.ts";
 import type { DiagnosticFn, FetchRequestOptions, SidebandData } from "../types.ts";
-import { parsePktLines, pktLine } from "./pkt_line.ts";
+import { DELIM_PKT, FLUSH_PKT, parsePktLines, pktLine } from "./pkt_line.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -11,7 +11,16 @@ const BAND_PACK = 1;
 const BAND_PROGRESS = 2;
 const BAND_ERROR = 3;
 
-const CONTROL_PREFIXES = ["shallow ", "unshallow ", "NAK", "ACK"];
+const CONTROL_PREFIXES = [
+  "version 2",
+  "shallow-info",
+  "wanted-refs",
+  "packfile",
+  "shallow ",
+  "unshallow ",
+  "NAK",
+  "ACK",
+];
 const CONTROL_PREFIX_PEEK = 16;
 
 function concat(parts: Uint8Array[]): Uint8Array {
@@ -26,6 +35,14 @@ function concat(parts: Uint8Array[]): Uint8Array {
 }
 
 export function buildFetchRequest(
+  options: FetchRequestOptions,
+): Result<Uint8Array, PktLineError> {
+  return options.protocolVersion === 2
+    ? buildV2FetchRequest(options)
+    : buildV0FetchRequest(options);
+}
+
+function buildV0FetchRequest(
   options: FetchRequestOptions,
 ): Result<Uint8Array, PktLineError> {
   const lines: Uint8Array[] = [];
@@ -46,10 +63,46 @@ export function buildFetchRequest(
     if (line.isErr()) return Result.err(line.error);
     lines.push(line.value);
   }
-  lines.push(encoder.encode("0000"));
+  lines.push(FLUSH_PKT);
   const done = pktLine(encoder.encode("done\n"));
   if (done.isErr()) return Result.err(done.error);
   lines.push(done.value);
+  return Result.ok(concat(lines));
+}
+
+function buildV2FetchRequest(
+  options: FetchRequestOptions,
+): Result<Uint8Array, PktLineError> {
+  const lines: Uint8Array[] = [];
+  for (const text of ["command=fetch\n", "agent=git-remote-ops-deno/0.1\n"]) {
+    const line = pktLine(encoder.encode(text));
+    if (line.isErr()) return Result.err(line.error);
+    lines.push(line.value);
+  }
+  lines.push(DELIM_PKT);
+  for (const text of ["thin-pack\n", "ofs-delta\n"]) {
+    const line = pktLine(encoder.encode(text));
+    if (line.isErr()) return Result.err(line.error);
+    lines.push(line.value);
+  }
+  for (const sha of options.wants) {
+    const line = pktLine(encoder.encode(`want ${sha}\n`));
+    if (line.isErr()) return Result.err(line.error);
+    lines.push(line.value);
+  }
+  if (options.depth !== undefined) {
+    const line = pktLine(encoder.encode(`deepen ${options.depth}\n`));
+    if (line.isErr()) return Result.err(line.error);
+    lines.push(line.value);
+  }
+  if (options.filterSpec !== undefined) {
+    const line = pktLine(encoder.encode(`filter ${options.filterSpec}\n`));
+    if (line.isErr()) return Result.err(line.error);
+    lines.push(line.value);
+  }
+  const done = pktLine(encoder.encode("done\n"));
+  if (done.isErr()) return Result.err(done.error);
+  lines.push(done.value, FLUSH_PKT);
   return Result.ok(concat(lines));
 }
 

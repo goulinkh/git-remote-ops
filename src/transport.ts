@@ -1,11 +1,20 @@
 import { Result } from "better-result";
 import { TransportError } from "./errors.ts";
-import type { HttpTransportResponse } from "./types.ts";
+import { Logger, NULL_LOGGER } from "./logger.ts";
+import type { GitProtocolOptions, HttpTransportResponse } from "./types.ts";
 
 const USER_AGENT = "git/2.0 (git-remote-ops-deno)";
 
+export interface TransportContext extends GitProtocolOptions {
+  logger?: Logger;
+}
+
 function trimUrl(url: string): string {
   return url.replace(/\/+$/, "");
+}
+
+function protocolHeaders(options?: GitProtocolOptions): HeadersInit {
+  return options?.protocolVersion === 2 ? { "Git-Protocol": "version=2" } : {};
 }
 
 async function readResponse(
@@ -44,10 +53,17 @@ async function readResponse(
 export async function getSmartHttp(
   url: string,
   path: string,
+  options?: TransportContext,
 ): Promise<Result<HttpTransportResponse, TransportError>> {
+  const logger = options?.logger ?? NULL_LOGGER;
   const requestUrl = `${trimUrl(url)}${path}`;
+  logger.debug(`GET ${path} (protocol=${options?.protocolVersion ?? 0})`);
+  const start = performance.now();
   const response = await Result.tryPromise({
-    try: () => fetch(requestUrl, { headers: { "User-Agent": USER_AGENT } }),
+    try: () =>
+      fetch(requestUrl, {
+        headers: { "User-Agent": USER_AGENT, ...protocolHeaders(options) },
+      }),
     catch: (cause) =>
       new TransportError({
         method: "GET",
@@ -57,14 +73,28 @@ export async function getSmartHttp(
       }),
   });
   if (response.isErr()) return Result.err(response.error);
-  return readResponse(response.value, `GET ${path}`, requestUrl);
+  const read = await readResponse(response.value, `GET ${path}`, requestUrl);
+  const durationMs = performance.now() - start;
+  if (read.isOk()) {
+    logger.recordHttp({ bytesIn: read.value.body.length, bytesOut: 0, durationMs });
+    logger.debug(
+      `GET ${path} -> ${response.value.status}, ${read.value.body.length}B in ${
+        durationMs.toFixed(1)
+      }ms`,
+    );
+  }
+  return read;
 }
 
 export async function postUploadPack(
   url: string,
   body: Uint8Array,
+  options?: TransportContext,
 ): Promise<Result<HttpTransportResponse, TransportError>> {
+  const logger = options?.logger ?? NULL_LOGGER;
   const requestUrl = `${trimUrl(url)}/git-upload-pack`;
+  logger.debug(`POST git-upload-pack (${body.length}B, protocol=${options?.protocolVersion ?? 0})`);
+  const start = performance.now();
   const response = await Result.tryPromise({
     try: () =>
       fetch(requestUrl, {
@@ -75,6 +105,7 @@ export async function postUploadPack(
           "Accept": "application/x-git-upload-pack-result",
           "User-Agent": USER_AGENT,
           "Connection": "close",
+          ...protocolHeaders(options),
         },
       }),
     catch: (cause) =>
@@ -86,5 +117,19 @@ export async function postUploadPack(
       }),
   });
   if (response.isErr()) return Result.err(response.error);
-  return readResponse(response.value, "POST git-upload-pack", requestUrl);
+  const read = await readResponse(response.value, "POST git-upload-pack", requestUrl);
+  const durationMs = performance.now() - start;
+  if (read.isOk()) {
+    logger.recordHttp({
+      bytesIn: read.value.body.length,
+      bytesOut: body.length,
+      durationMs,
+    });
+    logger.debug(
+      `POST git-upload-pack -> ${response.value.status}, ${read.value.body.length}B in ${
+        durationMs.toFixed(1)
+      }ms`,
+    );
+  }
+  return read;
 }
