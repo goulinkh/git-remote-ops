@@ -9,6 +9,7 @@
     "git-remote-ops": "./src/cli.ts"
   },
   "imports": {
+    "@cliffy/command": "jsr:@cliffy/command@^1.1.0",
     "@std/crypto": "jsr:@std/crypto@^1",
     "@std/encoding/hex": "jsr:@std/encoding@^1/hex",
     "better-result": "npm:better-result@^2"
