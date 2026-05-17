@@ -4,3 +4,5 @@ coverage/
 *.log
 tmp/
 .DS_Store
+
+cat-ai-rules-via-cli.sh
