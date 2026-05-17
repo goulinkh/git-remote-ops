@@ -50,7 +50,7 @@ src/testing/integration/
 | Change container lifecycle   | `testing/containers.ts`                      | Run, port lookup, cleanup                  |
 | Change OCI runtime detection | `testing/oci.ts`                             | Prefer podman, fallback docker, else throw |
 | Change repo capabilities     | `testing/repositories.ts`                    | Apply `uploadpack.*` and protocol config   |
-| Change integration coverage  | `src/testing/integration/remote_git.test.ts` | Probe/list/read/grep assertions            |
+| Change integration coverage  | `src/testing/integration/remote_git.test.ts` | Probe/fetch primitive assertions           |
 | Fast local HTTP smoke tests  | `testing/git_server.ts`                      | Uses host git only; not compatibility tier |
 
 ## CODE MAP
@@ -131,7 +131,7 @@ make temp dir -> create deterministic repo -> start profile container -> run Rem
 
 - **Matrix loop**: one `it(profile.name, ...)` per `CompatibilityProfile`
 - **Capability assertions**: verify `probe()` reports expected shallow/filter support
-- **Behavior assertions**: verify `listFiles`, `readFile`, and `grep`
+- **Behavior assertions**: verify `fetchCommit`, `fetchTree`, `fetchBlob`, and `getObject`
 - **Cleanup in `finally`**: always remove container and temp dir
 - **Negative runtime test**: missing OCI runtime should throw clear error
 
