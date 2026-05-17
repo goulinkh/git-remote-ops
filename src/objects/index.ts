@@ -1,1 +1,2 @@
-// TODO: barrel — commit, tree
+export * from "./commit.ts";
+export * from "./tree.ts";

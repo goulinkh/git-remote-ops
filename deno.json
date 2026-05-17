@@ -8,14 +8,18 @@
   "bin": {
     "git-remote-ops": "./src/cli.ts"
   },
+  "imports": {
+    "@std/crypto": "jsr:@std/crypto@^1",
+    "@std/encoding/hex": "jsr:@std/encoding@^1/hex",
+    "better-result": "npm:better-result@^2"
+  },
   "tasks": {
     "check": "deno check src/index.ts src/cli.ts",
     "fmt": "deno fmt",
     "fmt:check": "deno fmt --check",
     "lint": "deno lint",
-    "test": "deno test --allow-read tests",
-    "test:e2e": "deno test --allow-run --allow-net --allow-read --allow-write --allow-env tests/e2e",
-    "test:all": "deno test --allow-run --allow-net --allow-read --allow-write --allow-env tests",
+    "test": "deno test --allow-read src/objects src/pack src/protocol",
+    "test:all": "deno test --allow-run --allow-net --allow-read --allow-write --allow-env src",
     "verify": "deno fmt --check && deno lint && deno check src/index.ts src/cli.ts"
   },
   "fmt": {
