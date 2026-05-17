@@ -1,14 +1,20 @@
-import type { CompatibilityProfile } from "./profiles.ts";
+import { spawn } from "node:child_process";
+import { mkdir, writeFile } from "node:fs/promises";
+import type { CompatibilityProfile } from "./profiles.js";
+
+const decoder = new TextDecoder();
 
 async function run(cwd: string, args: string[]): Promise<void> {
-  const cmd = new Deno.Command(args[0], {
-    args: args.slice(1),
-    cwd,
-    stdout: "null",
-    stderr: "piped",
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(args[0]!, args.slice(1), { cwd, stdio: ["ignore", "ignore", "pipe"] });
+    const stderr: Buffer[] = [];
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(decoder.decode(Buffer.concat(stderr))));
+    });
   });
-  const result = await cmd.output();
-  if (!result.success) throw new Error(new TextDecoder().decode(result.stderr));
 }
 
 export async function createDeterministicRepo(
@@ -17,14 +23,14 @@ export async function createDeterministicRepo(
 ): Promise<string> {
   const repo = `${root}/repo.git`;
   const work = `${root}/work`;
-  await Deno.mkdir(work, { recursive: true });
+  await mkdir(work, { recursive: true });
   await run(work, ["git", "init"]);
   await run(work, ["git", "config", "user.email", "test@example.com"]);
   await run(work, ["git", "config", "user.name", "Test User"]);
-  await Deno.mkdir(`${work}/src`, { recursive: true });
-  await Deno.writeTextFile(`${work}/src/file_5.py`, "print(5)\n# TODO 5\n");
-  await Deno.writeTextFile(`${work}/README.md`, "demo\nTODO demo\n");
-  await Deno.writeFile(`${work}/src/binary.bin`, new Uint8Array([1, 0, 2]));
+  await mkdir(`${work}/src`, { recursive: true });
+  await writeFile(`${work}/src/file_5.py`, "print(5)\n# TODO 5\n");
+  await writeFile(`${work}/README.md`, "demo\nTODO demo\n");
+  await writeFile(`${work}/src/binary.bin`, new Uint8Array([1, 0, 2]));
   await run(work, ["git", "add", "."]);
   await run(work, ["git", "commit", "-m", "initial"]);
   await run(root, ["git", "clone", "--bare", work, repo]);

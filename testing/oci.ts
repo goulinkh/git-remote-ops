@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+
 export type OciCli = "podman" | "docker";
 
 export async function ociCli(): Promise<OciCli> {
@@ -13,17 +15,12 @@ export async function ociCli(): Promise<OciCli> {
 }
 
 async function commandExists(command: OciCli): Promise<boolean> {
-  try {
-    const result = await new Deno.Command(command, {
-      args: ["--version"],
-      stdout: "null",
-      stderr: "null",
-    }).output();
-    return result.success;
-  } catch (error) {
-    if (error instanceof Deno.errors.NotFound) {
-      return false;
-    }
-    throw error;
-  }
+  return await new Promise<boolean>((resolve, reject) => {
+    const child = spawn(command, ["--version"], { stdio: "ignore" });
+    child.on("error", (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") resolve(false);
+      else reject(error);
+    });
+    child.on("close", (code) => resolve(code === 0));
+  });
 }

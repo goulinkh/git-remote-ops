@@ -1,6 +1,6 @@
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { describe, it } from "https://deno.land/std@0.224.0/testing/bdd.ts";
-import { applyDelta } from "./delta.ts";
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { applyDelta } from "./delta.js";
 
 describe("applyDelta", () => {
   it("handles copy and insert", () => {
@@ -15,6 +15,6 @@ describe("applyDelta", () => {
     ]);
     const result = applyDelta(base, delta);
     if (result.isErr()) throw result.error;
-    assertEquals(new TextDecoder().decode(result.value), "hello world\n");
+    assert.deepStrictEqual(new TextDecoder().decode(result.value), "hello world\n");
   });
 });

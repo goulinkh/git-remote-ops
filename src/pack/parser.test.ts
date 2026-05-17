@@ -1,10 +1,9 @@
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { describe, it } from "https://deno.land/std@0.224.0/testing/bdd.ts";
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
 import { Result } from "better-result";
+import { createHash } from "node:crypto";
 import { deflateSync } from "node:zlib";
-import { crypto } from "@std/crypto";
-import { encodeHex } from "@std/encoding/hex";
-import { parsePackfile } from "./parser.ts";
+import { parsePackfile } from "./parser.js";
 
 function packHeader(type: number, size: number): Uint8Array {
   const out = [];
@@ -31,7 +30,7 @@ function concat(parts: Uint8Array[]): Uint8Array {
 }
 function sha(type: string, content: Uint8Array): string {
   const input = concat([new TextEncoder().encode(`${type} ${content.length}\0`), content]);
-  return encodeHex(new Uint8Array(crypto.subtle.digestSync("SHA-1", input as BufferSource)));
+  return createHash("sha1").update(input).digest("hex");
 }
 
 describe("parsePackfile", () => {
@@ -46,11 +45,11 @@ describe("parsePackfile", () => {
     ]);
     const pack = concat([
       body,
-      new Uint8Array(crypto.subtle.digestSync("SHA-1", body as BufferSource)),
+      createHash("sha1").update(body).digest(),
     ]);
     const parsed = parsePackfile(pack, { targets: new Set([blobSha]) });
     if (parsed.isErr()) throw parsed.error;
-    assertEquals(new TextDecoder().decode(parsed.value.objects.get(blobSha)!.content), "target\n");
+    assert.deepStrictEqual(new TextDecoder().decode(parsed.value.objects.get(blobSha)!.content), "target\n");
   });
 
   it("handles ref delta", () => {
@@ -80,11 +79,11 @@ describe("parsePackfile", () => {
     ]);
     const pack = concat([
       body,
-      new Uint8Array(crypto.subtle.digestSync("SHA-1", body as BufferSource)),
+      createHash("sha1").update(body).digest(),
     ]);
     const parsed = parsePackfile(pack);
     if (parsed.isErr()) throw parsed.error;
-    assertEquals(
+    assert.deepStrictEqual(
       new TextDecoder().decode(parsed.value.objects.get(sha("blob", target))!.content),
       "hello world\n",
     );
@@ -116,7 +115,7 @@ describe("parsePackfile", () => {
     ]);
     const pack = concat([
       body,
-      new Uint8Array(crypto.subtle.digestSync("SHA-1", body as BufferSource)),
+      createHash("sha1").update(body).digest(),
     ]);
     const sinked: string[] = [];
     const parsed = parsePackfile(pack, { retainTypes: new Set(["tree"]) }, (objectSha) => {
@@ -124,10 +123,10 @@ describe("parsePackfile", () => {
       return Result.ok(undefined);
     });
     if (parsed.isErr()) throw parsed.error;
-    assertEquals(parsed.value.objects.size, 0);
-    assertEquals(sinked.length, 0);
-    assertEquals(parsed.value.stats.materialized, 2);
-    assertEquals(parsed.value.stats.retained, 0);
-    assertEquals(parsed.value.stats.skippedByType.blob, 2);
+    assert.deepStrictEqual(parsed.value.objects.size, 0);
+    assert.deepStrictEqual(sinked.length, 0);
+    assert.deepStrictEqual(parsed.value.stats.materialized, 2);
+    assert.deepStrictEqual(parsed.value.stats.retained, 0);
+    assert.deepStrictEqual(parsed.value.stats.skippedByType.blob, 2);
   });
 });

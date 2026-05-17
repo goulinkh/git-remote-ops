@@ -1,8 +1,8 @@
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { describe, it } from "https://deno.land/std@0.224.0/testing/bdd.ts";
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
 import type { Result } from "better-result";
-import { pktLine } from "./pkt_line.ts";
-import { parseRefAdvertisement } from "./refs.ts";
+import { pktLine } from "./pkt_line.js";
+import { parseRefAdvertisement } from "./refs.js";
 
 function unwrap<T, E>(result: Result<T, E>): T {
   if (result.isErr()) throw result.error;
@@ -27,7 +27,7 @@ describe("parseRefAdvertisement", () => {
     }
     const parsed = parseRefAdvertisement(body);
     if (parsed.isErr()) throw parsed.error;
-    assertEquals(parsed.value.refs.get("HEAD"), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    assertEquals(parsed.value.capabilities.has("filter"), true);
+    assert.deepStrictEqual(parsed.value.refs.get("HEAD"), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    assert.deepStrictEqual(parsed.value.capabilities.has("filter"), true);
   });
 });

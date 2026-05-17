@@ -1,6 +1,6 @@
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { describe, it } from "https://deno.land/std@0.224.0/testing/bdd.ts";
-import { PackParseError, RefNotFoundError } from "./errors.ts";
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { PackParseError, RefNotFoundError } from "./errors.js";
 
 describe("tagged errors", () => {
   it("discriminates by _tag", () => {
@@ -11,8 +11,8 @@ describe("tagged errors", () => {
     });
     const ref = new RefNotFoundError({ ref: "main", message: "ref not found: main" });
 
-    assertEquals(pack._tag, "PackParseError");
-    assertEquals(PackParseError.is(pack), true);
-    assertEquals(PackParseError.is(ref), false);
+    assert.deepStrictEqual(pack._tag, "PackParseError");
+    assert.deepStrictEqual(PackParseError.is(pack), true);
+    assert.deepStrictEqual(PackParseError.is(ref), false);
   });
 });

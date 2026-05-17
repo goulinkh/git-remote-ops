@@ -1,5 +1,6 @@
-import type { CompatibilityProfile } from "./profiles.ts";
-import { ociCli } from "./oci.ts";
+import { spawn } from "node:child_process";
+import type { CompatibilityProfile } from "./profiles.js";
+import { ociCli } from "./oci.js";
 
 export interface GitContainer {
   url: string;
@@ -82,15 +83,19 @@ function parsePort(output: string): string {
 }
 
 async function run(command: string, args: string[]): Promise<string> {
-  const result = await new Deno.Command(command, {
-    args,
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
-  const stdout = decoder.decode(result.stdout);
-  if (!result.success) {
-    const stderr = decoder.decode(result.stderr).trim();
-    throw new Error(`${command} ${args.join(" ")} failed${stderr ? `: ${stderr}` : ""}`);
-  }
-  return stdout;
+  return await new Promise<string>((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve(decoder.decode(Buffer.concat(stdout)));
+      else {
+        const text = decoder.decode(Buffer.concat(stderr)).trim();
+        reject(new Error(`${command} ${args.join(" ")} failed${text ? `: ${text}` : ""}`));
+      }
+    });
+  });
 }

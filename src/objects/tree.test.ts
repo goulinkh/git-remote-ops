@@ -1,6 +1,6 @@
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { describe, it } from "https://deno.land/std@0.224.0/testing/bdd.ts";
-import { parseTree } from "./tree.ts";
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { parseTree } from "./tree.js";
 
 describe("parseTree", () => {
   it("reads entry", () => {
@@ -11,7 +11,7 @@ describe("parseTree", () => {
     content.set(sha, prefix.length);
     const result = parseTree(content);
     if (result.isErr()) throw result.error;
-    assertEquals(result.value, [{
+    assert.deepStrictEqual(result.value, [{
       mode: "100644",
       name: "file.txt",
       sha: "0101010101010101010101010101010101010101",

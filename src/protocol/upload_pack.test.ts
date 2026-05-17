@@ -1,7 +1,10 @@
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { describe, it } from "https://deno.land/std@0.224.0/testing/bdd.ts";
-import { pktLine } from "./pkt_line.ts";
-import { demuxSideband, extractPackToFile } from "./upload_pack.ts";
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, it } from "node:test";
+import { pktLine } from "./pkt_line.js";
+import { demuxSideband, extractPackToFile } from "./upload_pack.js";
 
 describe("demuxSideband", () => {
   it("splits channels", () => {
@@ -10,11 +13,11 @@ describe("demuxSideband", () => {
     if (packet.isErr()) throw packet.error;
     const data = demuxSideband(packet.value);
     if (data.isErr()) throw data.error;
-    assertEquals(new TextDecoder().decode(data.value.pack), "PACKdata");
+    assert.deepStrictEqual(new TextDecoder().decode(data.value.pack), "PACKdata");
   });
 
   it("streams channel 1 to a pack file", async () => {
-    const dir = await Deno.makeTempDir();
+    const dir = await mkdtemp(join(tmpdir(), "git-remote-ops-"));
     try {
       const enc = new TextEncoder();
       const first = pktLine(new Uint8Array([1, ...enc.encode("PACK")]));
@@ -26,14 +29,14 @@ describe("demuxSideband", () => {
       raw.set(second.value, first.value.length);
       const src = `${dir}/raw`;
       const dest = `${dir}/pack`;
-      await Deno.writeFile(src, raw);
+      await writeFile(src, raw);
 
       const length = await extractPackToFile(src, dest);
       if (length.isErr()) throw length.error;
-      assertEquals(length.value, 8);
-      assertEquals(new TextDecoder().decode(await Deno.readFile(dest)), "PACKdata");
+      assert.deepStrictEqual(length.value, 8);
+      assert.deepStrictEqual(new TextDecoder().decode(await readFile(dest)), "PACKdata");
     } finally {
-      await Deno.remove(dir, { recursive: true });
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });
