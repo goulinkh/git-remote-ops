@@ -20,21 +20,23 @@ If consumer needs writes or full clones, shell out to `git` instead.
 ## Install
 
 ```ts
-import { RemoteGit } from "jsr:@local/git-remote-ops";
+import { RemoteGit } from "git-remote-ops";
 ```
 
-Deno only. Requires `--allow-net`, plus `--allow-read --allow-write` for object store access.
+Node.js 24 LTS package. Use pnpm for local development and npm-compatible package installs for consumers.
 
 CLI:
 
 ```sh
-deno install --global -A -n git-remote-ops src/cli.ts
+pnpm install
+pnpm build
+pnpm exec git-remote-ops --help
 ```
 
 ## Core API
 
 One class. All methods async. All return `Result<T, GitRemoteOpsError>` from
-[`better-result`](https://jsr.io/@local/better-result) — never throw.
+`better-result` — never throw.
 
 ```ts
 const client = new RemoteGit(url, { storeDir, logger?, diagnostic? });
@@ -100,7 +102,7 @@ advertise the capability — depth drops, filter logs at info and proceeds.
 Library silent unless told otherwise.
 
 ```ts
-import { Logger } from "jsr:@local/git-remote-ops";
+import { Logger } from "git-remote-ops";
 
 const logger = new Logger({ level: "debug" });
 const client = new RemoteGit(url, { logger, storeDir });
@@ -169,7 +171,7 @@ Every file carries a module-level JSDoc banner with intent. Every constant docum
 
 ## Versioning
 
-Pre-1.0. API may shift. Pin exact version in `deno.json` imports.
+Pre-1.0. API may shift. Pin exact package versions in `package.json`.
 
 ## License
 

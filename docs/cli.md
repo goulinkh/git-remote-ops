@@ -6,15 +6,16 @@ objects you ask for.
 ## Install / Run
 
 ```sh
-# Run from source via Deno tasks
-deno run --allow-net --allow-read --allow-write src/cli.ts --store-dir /tmp/gro-cache <command> <url> [options]
+# Run from source
+pnpm install
+pnpm exec tsx src/cli.ts --store-dir /tmp/gro-cache <command> <url> [options]
 
-# Or install as a binary (requires deno install)
-deno install --global -A -n git-remote-ops src/cli.ts
-git-remote-ops <command> <url> [options]
+# Or run the built binary
+pnpm build
+pnpm exec git-remote-ops <command> <url> [options]
 ```
 
-Required permissions: `--allow-net --allow-read --allow-write`.
+Requires Node.js 24 LTS.
 
 `--store-dir <path>` is required. Reuse the same directory to dedupe objects across runs.
 
@@ -86,7 +87,7 @@ git-remote-ops --store-dir /tmp/gro-cache cat-blob https://github.com/owner/repo
 | `-V`, `--version` | Print version                                                  |
 
 Default log level: `info`. `--quiet` conflicts with `--verbose`/`--debug`. CLI parsing handled by
-`@cliffy/command`.
+`commander`.
 
 ### Stats output
 

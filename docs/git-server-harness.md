@@ -139,9 +139,9 @@ make temp dir -> create deterministic repo -> start profile container -> run Rem
 
 ```bash
 bash testing/docker/build.sh       # Build all profile images via podman/docker
-deno task test:integration         # Run smart-HTTP compatibility tests
-deno task test                     # Unit tests; should not require containers
-deno task test:all                 # Full suite
+pnpm test:integration              # Run smart-HTTP compatibility tests
+pnpm test                          # Unit tests; should not require containers
+pnpm test:all                      # Full suite
 ```
 
 Manual profile check:
@@ -155,7 +155,7 @@ git clone http://127.0.0.1:8080/repo.git
 Negative runtime check:
 
 ```bash
-PATH=/tmp deno task test:integration
+PATH=/tmp pnpm test:integration
 ```
 
 ## NOTES

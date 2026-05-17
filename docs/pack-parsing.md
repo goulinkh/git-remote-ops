@@ -49,9 +49,9 @@ This is one inflate per object; cost is O(stream-length).
   second stream from trailing bytes. With concatenated pack streams this fails with
   `incorrect header check` and `total_in` is unreliable.
 - **`createInflate()` streaming**: works but forces an async `decompressAt`, cascading through
-  `parsePackfile`. Not worth it while `_processChunk` is reliable on Deno's node-compat.
+  `parsePackfile`. Not worth it while `_processChunk` is reliable on Node.js.
 
-### Deno node:zlib caveats
+### Node zlib caveats
 
 `Inflate` is exported as a type-only name in the type defs; instantiate via
 `(zlib as { Inflate: new (opts) => ... }).Inflate({...})`. `Buffer.from(uint8array)` (copy form) is
@@ -84,8 +84,10 @@ used to avoid byteOffset edge cases when passing subarrays into `_processChunk`.
 Add to `parsePackfile`:
 
 ```ts
-if (Deno.env.get("PARSER_DUMP")) {
-  Deno.writeFileSync(Deno.env.get("PARSER_DUMP")!, pack);
+import { writeFileSync } from "node:fs";
+
+if (process.env.PARSER_DUMP) {
+  writeFileSync(process.env.PARSER_DUMP, pack);
 }
 ```
 
@@ -109,4 +111,4 @@ Launchpad / GitHub exercise:
 - Legitimate `0x0a` bytes inside zlib streams (the LF-strip regression)
 
 The smart-HTTP harness at `src/testing/integration/remote_git.test.ts` covers github, gitlab,
-forgejo, launchpad-turnip. Run with `deno task test:integration` after parser changes.
+forgejo, launchpad-turnip. Run with `pnpm test:integration` after parser changes.
