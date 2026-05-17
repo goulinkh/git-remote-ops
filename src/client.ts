@@ -1,24 +1,26 @@
 import { Result } from "better-result";
 import type { GitRemoteOpsError } from "./errors.ts";
 import { ObjectDecodeError, ObjectNotFoundError, RefNotFoundError } from "./errors.ts";
+import { Logger } from "./logger.ts";
 import type {
   CommitInfo,
   DiagnosticFn,
-  FileEntry,
+  FetchCommitOptions,
   GitObject,
   GitObjectMap,
-  GrepMatch,
-  GrepOptions,
   RemoteGitOptions,
   ServerProfile,
+  TreeEntry,
 } from "./types.ts";
-import { parseCommit, resolvePathToBlob, walkTree } from "./objects/index.ts";
+import { parseCommit, parseTree } from "./objects/index.ts";
 import { parsePackfile } from "./pack/index.ts";
-import { buildFetchRequest, extractPack, parseRefAdvertisement } from "./protocol/index.ts";
+import {
+  buildFetchRequest,
+  extractPack,
+  parseRefAdvertisement,
+  parseV2CapabilityAdvertisement,
+} from "./protocol/index.ts";
 import { getSmartHttp, postUploadPack } from "./transport.ts";
-import { matchesGlob } from "./utils/glob.ts";
-
-const decoder = new TextDecoder();
 
 const DEFAULT_CAPS = [
   "multi_ack",
@@ -41,28 +43,57 @@ function buildCaps(opts: { shallow?: boolean; filter?: boolean } = {}): string[]
 
 export class RemoteGit {
   readonly url: string;
+  readonly logger: Logger;
   private profile: ServerProfile | null = null;
   private objects: GitObjectMap = new Map();
   private snapshotCommits = new Set<string>();
   private diagnostic?: DiagnosticFn;
+  private transportLogger: Logger;
+  private packLogger: Logger;
 
   constructor(url: string, options?: RemoteGitOptions) {
     this.url = url.replace(/\/+$/, "");
     this.diagnostic = options?.diagnostic;
+    this.logger = options?.logger ??
+      new Logger({
+        level: options?.diagnostic ? "debug" : "silent",
+        sink: options?.diagnostic,
+      }, "client");
+    this.transportLogger = this.logger.child("transport");
+    this.packLogger = this.logger.child("pack");
   }
 
   async discover(): Promise<Result<ServerProfile, GitRemoteOpsError>> {
-    const response = await getSmartHttp(this.url, "/info/refs?service=git-upload-pack");
+    this.logger.info(`discover ${this.url}`);
+    const response = await getSmartHttp(this.url, "/info/refs?service=git-upload-pack", {
+      logger: this.transportLogger,
+    });
     if (response.isErr()) return fail(response.error);
     const parsed = parseRefAdvertisement(response.value.body);
     if (parsed.isErr()) return fail(parsed.error);
+
+    let protocolVersion: 0 | 2 = 0;
+    const capabilities = new Set(parsed.value.capabilities);
+    const v2Response = await getSmartHttp(this.url, "/info/refs?service=git-upload-pack", {
+      protocolVersion: 2,
+      logger: this.transportLogger,
+    });
+    if (v2Response.isOk()) {
+      const parsedV2 = parseV2CapabilityAdvertisement(v2Response.value.body);
+      if (parsedV2.isOk() && parsedV2.value.has("version=2")) {
+        protocolVersion = 2;
+        for (const cap of parsedV2.value) capabilities.add(cap);
+      }
+    }
+
     this.profile = {
       url: this.url,
       refs: parsed.value.refs,
-      advertisedCaps: parsed.value.capabilities,
+      advertisedCaps: capabilities,
+      protocolVersion,
       supportsFilterBlobNone: false,
       supportsFilterTree0: false,
-      supportsShallow: false,
+      supportsShallow: capabilities.has("shallow"),
       probed: false,
     };
     return Result.ok(this.profile);
@@ -82,9 +113,6 @@ export class RemoteGit {
     if (advertisesFilter) {
       await this.probeFilter(profile, targetSha.value, verbose);
     }
-    if (!profile.supportsFilterBlobNone) {
-      await this.probeShallow(profile, targetSha.value, verbose);
-    }
     profile.probed = true;
     return Result.ok(profile);
   }
@@ -95,103 +123,7 @@ export class RemoteGit {
     return Result.ok(new Map(profile.value.refs));
   }
 
-  private async loadCommit(
-    ref: string,
-  ): Promise<
-    Result<{ profile: ServerProfile; objects: GitObjectMap; commit: CommitInfo }, GitRemoteOpsError>
-  > {
-    const profile = this.profile ? Result.ok(this.profile) : await this.probe();
-    if (profile.isErr()) return fail(profile.error);
-    const commitSha = await this.resolveRef(ref);
-    if (commitSha.isErr()) return fail(commitSha.error);
-    const filter = profile.value.supportsFilterBlobNone ? "blob:none" : undefined;
-    const objects = await this.fetchObjects([commitSha.value], 1, filter);
-    if (objects.isErr()) return fail(objects.error);
-    const object = requiredObject(objects.value, commitSha.value);
-    if (object.isErr()) return fail(object.error);
-    const commit = parseCommit(object.value.content);
-    if (commit.isErr()) return fail(commit.error);
-    return Result.ok({ profile: profile.value, objects: objects.value, commit: commit.value });
-  }
-
-  async listFiles(ref = "HEAD", pathPrefix = ""): Promise<Result<FileEntry[], GitRemoteOpsError>> {
-    const loaded = await this.loadCommit(ref);
-    if (loaded.isErr()) return fail(loaded.error);
-    const prefix = pathPrefix.replace(/^\/+|\/+$/g, "");
-    const files = walkTree(loaded.value.objects, loaded.value.commit.tree);
-    if (files.isErr()) return fail(files.error);
-    return Result.ok(
-      prefix
-        ? files.value.filter((file) => file.path === prefix || file.path.startsWith(`${prefix}/`))
-        : files.value,
-    );
-  }
-
-  async readFile(path: string, ref = "HEAD"): Promise<Result<Uint8Array, GitRemoteOpsError>> {
-    const loaded = await this.loadCommit(ref);
-    if (loaded.isErr()) return fail(loaded.error);
-    const blobSha = resolvePathToBlob(loaded.value.objects, loaded.value.commit.tree, path);
-    if (blobSha.isErr()) return fail(blobSha.error);
-    if (loaded.value.profile.supportsFilterBlobNone) {
-      const fetched = await this.fetchObjects([blobSha.value]);
-      if (fetched.isErr()) return fail(fetched.error);
-    }
-    const object = requiredObject(this.objects, blobSha.value);
-    if (object.isErr()) return fail(object.error);
-    return Result.ok(object.value.content);
-  }
-
-  async grep(
-    pattern: string | RegExp,
-    options: GrepOptions = {},
-  ): Promise<Result<GrepMatch[], GitRemoteOpsError>> {
-    const loaded = await this.loadCommit(options.ref ?? "HEAD");
-    if (loaded.isErr()) return fail(loaded.error);
-    const regex = typeof pattern === "string"
-      ? Result.try({
-        try: () => new RegExp(pattern, options.ignoreCase ? "i" : ""),
-        catch: (cause) =>
-          new ObjectDecodeError({
-            reason: "invalid-grep-pattern",
-            message: `invalid grep pattern: ${pattern}`,
-            cause,
-          }),
-      })
-      : Result.ok(pattern);
-    if (regex.isErr()) return fail(regex.error);
-    let entries = walkTree(loaded.value.objects, loaded.value.commit.tree);
-    if (entries.isErr()) return fail(entries.error);
-    if (options.pathGlob) {
-      entries = Result.ok(
-        entries.value.filter((entry) => matchesGlob(entry.path, options.pathGlob!)),
-      );
-    }
-    if (loaded.value.profile.supportsFilterBlobNone) {
-      const blobs = entries.value.map((entry) => entry.sha);
-      if (blobs.length > 0) {
-        this.log(`grep: fetching ${blobs.length} blobs after path filtering`);
-        const fetched = await this.fetchObjects(blobs);
-        if (fetched.isErr()) return fail(fetched.error);
-      }
-    }
-    const maxMatches = options.maxMatches ?? 100;
-    const matches: GrepMatch[] = [];
-    for (const entry of entries.value) {
-      const object = this.objects.get(entry.sha);
-      if (!object || object.type !== "blob") {
-        continue;
-      }
-      matches.push(
-        ...grepBlob(entry.path, object.content, regex.value, maxMatches - matches.length),
-      );
-      if (matches.length >= maxMatches) {
-        break;
-      }
-    }
-    return Result.ok(matches);
-  }
-
-  private async resolveRef(ref: string): Promise<Result<string, GitRemoteOpsError>> {
+  async resolveRef(ref: string): Promise<Result<string, GitRemoteOpsError>> {
     const profile = this.profile ? Result.ok(this.profile) : await this.discover();
     if (profile.isErr()) return fail(profile.error);
     for (const candidate of [ref, `refs/heads/${ref}`, `refs/tags/${ref}`]) {
@@ -206,19 +138,162 @@ export class RemoteGit {
     return fail(new RefNotFoundError({ ref, message: `ref not found: ${ref}` }));
   }
 
+  async fetchCommit(
+    ref: string,
+    options: FetchCommitOptions = {},
+  ): Promise<Result<{ commit: CommitInfo; sha: string }, GitRemoteOpsError>> {
+    const profile = this.profile ? Result.ok(this.profile) : await this.discover();
+    if (profile.isErr()) return fail(profile.error);
+    const commitSha = await this.resolveRef(ref);
+    if (commitSha.isErr()) return fail(commitSha.error);
+    const depth = options.depth !== undefined && profile.value.supportsShallow
+      ? options.depth
+      : undefined;
+    const filter = options.filter !== undefined && profile.value.advertisedCaps.has("filter")
+      ? options.filter
+      : undefined;
+    if (options.filter !== undefined && filter === undefined) {
+      this.logger.info(
+        `server does not advertise object filters; fetching without ${options.filter}`,
+      );
+    }
+    const objects = await this.fetchObjects(
+      [commitSha.value],
+      depth,
+      filter,
+      options.parseFull === true,
+    );
+    if (objects.isErr()) return fail(objects.error);
+    const object = requiredObject(objects.value, commitSha.value);
+    if (object.isErr()) return fail(object.error);
+    if (object.value.type !== "commit") {
+      return fail(
+        new ObjectDecodeError({
+          reason: "unexpected-object-type",
+          message: `object is not a commit: ${commitSha.value}`,
+          objectType: object.value.type,
+          sha: commitSha.value,
+        }),
+      );
+    }
+    const commit = parseCommit(object.value.content);
+    if (commit.isErr()) return fail(commit.error);
+    return Result.ok({ commit: commit.value, sha: commitSha.value });
+  }
+
+  async fetchBlob(sha: string): Promise<Result<Uint8Array, GitRemoteOpsError>> {
+    const profile = this.profile ? Result.ok(this.profile) : await this.discover();
+    if (profile.isErr()) return fail(profile.error);
+    const objects = await this.fetchObjects([sha]);
+    if (objects.isErr()) return fail(objects.error);
+    const object = requiredObject(objects.value, sha);
+    if (object.isErr()) return fail(object.error);
+    if (object.value.type !== "blob") {
+      return fail(
+        new ObjectDecodeError({
+          reason: "unexpected-object-type",
+          message: `object is not a blob: ${sha}`,
+          objectType: object.value.type,
+          sha,
+        }),
+      );
+    }
+    return Result.ok(object.value.content);
+  }
+
+  async fetchTreeForCommit(
+    ref: string,
+    options: FetchCommitOptions = {},
+  ): Promise<
+    Result<{ commit: CommitInfo; commitSha: string; entries: TreeEntry[] }, GitRemoteOpsError>
+  > {
+    const commit = await this.fetchCommit(ref, { ...options, parseFull: true });
+    if (commit.isErr()) return fail(commit.error);
+    const treeObject = this.objects.get(commit.value.commit.tree);
+    if (!treeObject) {
+      return fail(
+        new ObjectNotFoundError({
+          sha: commit.value.commit.tree,
+          message: `tree ${commit.value.commit.tree} not present in snapshot pack`,
+        }),
+      );
+    }
+    if (treeObject.type !== "tree") {
+      return fail(
+        new ObjectDecodeError({
+          reason: "unexpected-object-type",
+          message: `object is not a tree: ${commit.value.commit.tree}`,
+          objectType: treeObject.type,
+          sha: commit.value.commit.tree,
+        }),
+      );
+    }
+    const entries = parseTree(treeObject.content);
+    if (entries.isErr()) return fail(entries.error);
+    return Result.ok({
+      commit: commit.value.commit,
+      commitSha: commit.value.sha,
+      entries: entries.value,
+    });
+  }
+
+  async fetchTree(sha: string): Promise<Result<TreeEntry[], GitRemoteOpsError>> {
+    const profile = this.profile ? Result.ok(this.profile) : await this.discover();
+    if (profile.isErr()) return fail(profile.error);
+    const objects = await this.fetchObjects([sha]);
+    if (objects.isErr()) return fail(objects.error);
+    const object = requiredObject(objects.value, sha);
+    if (object.isErr()) return fail(object.error);
+    if (object.value.type !== "tree") {
+      return fail(
+        new ObjectDecodeError({
+          reason: "unexpected-object-type",
+          message: `object is not a tree: ${sha}`,
+          objectType: object.value.type,
+          sha,
+        }),
+      );
+    }
+    const tree = parseTree(object.value.content);
+    if (tree.isErr()) return fail(tree.error);
+    return Result.ok(tree.value);
+  }
+
+  getObject(sha: string): GitObject | undefined {
+    return this.objects.get(sha);
+  }
+
   private async fetchObjects(
     wants: string[],
     depth?: number,
     filterSpec?: string,
+    parseFull = false,
   ): Promise<Result<GitObjectMap, GitRemoteOpsError>> {
     const normalized = this.normalizeWants(wants, depth, filterSpec);
     if (normalized.length === 0) {
       return Result.ok(this.objects);
     }
+    this.logger.debug(
+      `fetchObjects wants=${normalized.length} depth=${depth ?? "-"} filter=${filterSpec ?? "-"}`,
+    );
     const pack = await this.fetchPack(normalized, depth, filterSpec);
     if (pack.isErr()) return fail(pack.error);
-    const parsed = parsePackfile(pack.value);
+    const parseStart = performance.now();
+    const targets = !parseFull && normalized.length === 1 ? new Set(normalized) : undefined;
+    const parsed = parsePackfile(pack.value, targets);
+    const parseMs = performance.now() - parseStart;
     if (parsed.isErr()) return fail(parsed.error);
+    const counts = countByType(parsed.value);
+    this.packLogger.recordPack({
+      bytes: pack.value.length,
+      durationMs: parseMs,
+      byType: counts,
+    });
+    this.packLogger.debug(
+      `parsed ${parsed.value.size} objects (${counts.commit}c/${counts.tree}t/${counts.blob}b/${counts.tag}T) in ${
+        parseMs.toFixed(1)
+      }ms`,
+    );
     for (const [sha, object] of parsed.value) {
       this.objects.set(sha, object);
     }
@@ -264,36 +339,33 @@ export class RemoteGit {
     }
   }
 
-  private async probeShallow(
-    profile: ServerProfile,
-    sha: string,
-    verbose: boolean,
-  ): Promise<void> {
-    const depth = profile.supportsShallow ? 1 : undefined;
-    const pack = await this.fetchPack([sha], depth, undefined, buildCaps({ shallow: !!depth }));
-    if (pack.isErr()) {
-      if (verbose) this.log(`shallow probe failed: ${pack.error}`);
-      return;
-    }
-    profile.supportsShallow = true;
-  }
-
   private async fetchPack(
     wants: string[],
     depth?: number,
     filterSpec?: string,
     caps?: string[],
   ): Promise<Result<Uint8Array, GitRemoteOpsError>> {
+    const protocolVersion = this.profile?.protocolVersion ?? 0;
     const requestCaps = caps ?? buildCaps({
       shallow: depth !== undefined,
       filter: filterSpec !== undefined,
     });
-    const body = buildFetchRequest({ wants, caps: requestCaps, depth, filterSpec });
+    const body = buildFetchRequest({
+      wants,
+      caps: requestCaps,
+      depth,
+      filterSpec,
+      protocolVersion,
+    });
     if (body.isErr()) return fail(body.error);
-    const response = await postUploadPack(this.url, body.value);
+    const response = await postUploadPack(this.url, body.value, {
+      protocolVersion,
+      logger: this.transportLogger,
+    });
     if (response.isErr()) return fail(response.error);
     const pack = extractPack(response.value.body, this.diagnostic);
     if (pack.isErr()) return fail(pack.error);
+    this.packLogger.debug(`extracted pack: ${pack.value.length}B`);
     return Result.ok(pack.value);
   }
 
@@ -331,21 +403,4 @@ function countByType(objects: GitObjectMap): Record<"commit" | "tree" | "blob" |
   const counts = { commit: 0, tree: 0, blob: 0, tag: 0 };
   for (const obj of objects.values()) counts[obj.type]++;
   return counts;
-}
-
-function grepBlob(path: string, content: Uint8Array, regex: RegExp, limit: number): GrepMatch[] {
-  if (limit <= 0 || content.subarray(0, 8192).includes(0)) {
-    return [];
-  }
-  const lines = decoder.decode(content).split("\n");
-  const matches: GrepMatch[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (regex.test(lines[i])) {
-      matches.push({ path, lineNumber: i + 1, line: lines[i] });
-      if (matches.length >= limit) {
-        break;
-      }
-    }
-  }
-  return matches;
 }

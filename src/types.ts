@@ -13,12 +13,6 @@ export interface TreeEntry {
   sha: string;
 }
 
-export interface FileEntry {
-  mode: string;
-  path: string;
-  sha: string;
-}
-
 export interface CommitInfo {
   tree: string;
   parent?: string;
@@ -26,10 +20,17 @@ export interface CommitInfo {
   committer?: string;
 }
 
+export interface FetchCommitOptions {
+  depth?: number;
+  filter?: string;
+  parseFull?: boolean;
+}
+
 export interface ServerProfile {
   url: string;
   refs: Map<string, string>;
   advertisedCaps: Set<string>;
+  protocolVersion: 0 | 2;
   supportsFilterBlobNone: boolean;
   supportsFilterTree0: boolean;
   supportsShallow: boolean;
@@ -38,22 +39,10 @@ export interface ServerProfile {
 
 export interface RemoteGitOptions {
   diagnostic?: DiagnosticFn;
+  logger?: import("./logger.ts").Logger;
 }
 
 export type DiagnosticFn = (message: string) => void;
-
-export interface GrepOptions {
-  ref?: string;
-  pathGlob?: string;
-  maxMatches?: number;
-  ignoreCase?: boolean;
-}
-
-export interface GrepMatch {
-  path: string;
-  lineNumber: number;
-  line: string;
-}
 
 export interface PktLine {
   offset: number;
@@ -87,9 +76,14 @@ export interface FetchRequestOptions {
   caps: string[];
   depth?: number;
   filterSpec?: string;
+  protocolVersion?: 0 | 2;
 }
 
 export interface HttpTransportResponse {
   body: Uint8Array;
   status: number;
+}
+
+export interface GitProtocolOptions {
+  protocolVersion?: 0 | 2;
 }

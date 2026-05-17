@@ -1,7 +1,13 @@
 import { Result } from "better-result";
 import { encodeHex } from "@std/encoding/hex";
 import { ObjectDecodeError, PathNotFoundError } from "../errors.ts";
-import type { FileEntry, GitObjectMap, TreeEntry } from "../types.ts";
+import type { GitObjectMap, TreeEntry } from "../types.ts";
+
+interface FileEntry {
+  mode: string;
+  path: string;
+  sha: string;
+}
 
 const TREE_MODE = "40000";
 const SPACE = 0x20;

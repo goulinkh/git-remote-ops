@@ -1,5 +1,7 @@
 /** @module git-remote-ops */
 export { RemoteGit } from "./client.ts";
+export { Logger, NULL_LOGGER } from "./logger.ts";
+export type { LoggerOptions, LogLevel, Metrics } from "./logger.ts";
 export {
   ObjectDecodeError,
   ObjectNotFoundError,
@@ -14,12 +16,10 @@ export type { GitRemoteOpsError } from "./errors.ts";
 export type {
   CommitInfo,
   DiagnosticFn,
-  FileEntry,
+  FetchCommitOptions,
   GitObject,
   GitObjectMap,
   GitObjectType,
-  GrepMatch,
-  GrepOptions,
   RemoteGitOptions,
   ServerProfile,
   TreeEntry,
