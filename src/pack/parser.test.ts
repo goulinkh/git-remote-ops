@@ -34,6 +34,24 @@ function sha(type: string, content: Uint8Array): string {
 }
 
 describe("parsePackfile", () => {
+  it("stops after requested target", () => {
+    const blob = new TextEncoder().encode("target\n");
+    const blobSha = sha("blob", blob);
+    const body = concat([
+      new TextEncoder().encode("PACK"),
+      new Uint8Array([0, 0, 0, 2, 0, 0, 0, 2]),
+      concat([packHeader(3, blob.length), deflateSync(blob)]),
+      new Uint8Array([0xff]),
+    ]);
+    const pack = concat([
+      body,
+      new Uint8Array(crypto.subtle.digestSync("SHA-1", body as BufferSource)),
+    ]);
+    const parsed = parsePackfile(pack, new Set([blobSha]));
+    if (parsed.isErr()) throw parsed.error;
+    assertEquals(new TextDecoder().decode(parsed.value.get(blobSha)!.content), "target\n");
+  });
+
   it("handles ref delta", () => {
     const base = new TextEncoder().encode("hello ");
     const target = new TextEncoder().encode("hello world\n");

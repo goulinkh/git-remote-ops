@@ -1,5 +1,6 @@
 import { Result } from "better-result";
-import { inflateSync } from "node:zlib";
+import zlib from "node:zlib";
+import { Buffer } from "node:buffer";
 import { encodeHex } from "@std/encoding/hex";
 import { PackParseError } from "../errors.ts";
 import type {
@@ -94,47 +95,57 @@ export function readPackObjectHeader(
   return Result.ok({ type, size, offset });
 }
 
+interface InflateEngine {
+  _processChunk(chunk: Buffer, flushFlag: number): Buffer;
+  bytesWritten: number;
+  close(): void;
+}
+
 export function decompressAt(
   data: Uint8Array,
   offset: number,
   expectedSize?: number,
 ): Result<ReadResult<Uint8Array>, PackParseError> {
-  const max = Math.max(offset + 2, data.length - PACK_TRAILER_SIZE);
-  for (let end = offset + 2; end <= max; end++) {
-    try {
-      const value = new Uint8Array(inflateSync(data.subarray(offset, end)));
-      if (expectedSize === undefined || value.length === expectedSize) {
-        return Result.ok({ value, offset: end });
-      }
-    } catch {
-      // try longer zlib stream
-    }
-  }
-
-  const fallback = Result.try({
-    try: () => new Uint8Array(inflateSync(data.subarray(offset))),
-    catch: (cause) =>
+  const slice = data.subarray(offset, data.length - PACK_TRAILER_SIZE);
+  const input = Buffer.from(slice);
+  const engine = new (zlib as unknown as {
+    Inflate: new (opts: { chunkSize?: number }) => InflateEngine;
+  }).Inflate({
+    chunkSize: expectedSize !== undefined ? Math.max(expectedSize + 16, 1024) : 16384,
+  });
+  let output: Buffer;
+  try {
+    output = engine._processChunk(input, zlib.constants.Z_FINISH);
+  } catch (cause) {
+    engine.close();
+    return Result.err(
       new PackParseError({
         reason: "inflate-failed",
-        message: "failed to inflate pack object",
+        message: `failed to inflate pack object: ${(cause as Error)?.message ?? cause}`,
         offset,
         cause,
       }),
-  });
-  if (fallback.isErr()) return Result.err(fallback.error);
-  if (expectedSize !== undefined && fallback.value.length !== expectedSize) {
+    );
+  }
+  const consumed = engine.bytesWritten;
+  engine.close();
+  if (expectedSize !== undefined && output.length !== expectedSize) {
     return Result.err(
       new PackParseError({
         reason: "inflated-size-mismatch",
-        message: `object inflated to ${fallback.value.length} bytes, expected ${expectedSize}`,
+        message: `object inflated to ${output.length} bytes, expected ${expectedSize}`,
         offset,
       }),
     );
   }
-  return Result.ok({ value: fallback.value, offset: data.length });
+  const value = new Uint8Array(output.buffer, output.byteOffset, output.byteLength);
+  return Result.ok({ value, offset: offset + consumed });
 }
 
-export function parsePackfile(pack: Uint8Array): Result<GitObjectMap, PackParseError> {
+export function parsePackfile(
+  pack: Uint8Array,
+  targets?: ReadonlySet<string>,
+): Result<GitObjectMap, PackParseError> {
   if (pack.length < PACK_HEADER_SIZE + PACK_TRAILER_SIZE) {
     return Result.err(
       new PackParseError({
@@ -177,7 +188,7 @@ export function parsePackfile(pack: Uint8Array): Result<GitObjectMap, PackParseE
     typeNumber: number,
     content: Uint8Array,
     objectOffset: number,
-  ): Result<void, PackParseError> {
+  ): Result<string, PackParseError> {
     const type = OBJ_NAMES.get(typeNumber);
     if (!type) {
       return Result.err(
@@ -193,7 +204,11 @@ export function parsePackfile(pack: Uint8Array): Result<GitObjectMap, PackParseE
     const object = { type, content };
     bySha.set(sha.value, object);
     byOffset.set(objectOffset, object);
-    return Result.ok();
+    return Result.ok(sha.value);
+  }
+
+  function foundTargets(): boolean {
+    return targets !== undefined && [...targets].every((sha) => bySha.has(sha));
   }
 
   for (let i = 0; i < count; i++) {
@@ -206,6 +221,7 @@ export function parsePackfile(pack: Uint8Array): Result<GitObjectMap, PackParseE
       if (result.isErr()) return Result.err(result.error);
       const stored = store(header.value.type, result.value.value, objectOffset);
       if (stored.isErr()) return Result.err(stored.error);
+      if (foundTargets()) return Result.ok(bySha);
       offset = result.value.offset;
     } else if (header.value.type === OBJ_OFS_DELTA) {
       const varint = readVarintBe(pack, offset);
@@ -229,6 +245,7 @@ export function parsePackfile(pack: Uint8Array): Result<GitObjectMap, PackParseE
       if (typeNumber.isErr()) return Result.err(typeNumber.error);
       const stored = store(typeNumber.value, applied.value, objectOffset);
       if (stored.isErr()) return Result.err(stored.error);
+      if (foundTargets()) return Result.ok(bySha);
       offset = result.value.offset;
     } else if (header.value.type === OBJ_REF_DELTA) {
       if (offset + REF_DELTA_SHA_SIZE > pack.length) {
@@ -272,6 +289,7 @@ export function parsePackfile(pack: Uint8Array): Result<GitObjectMap, PackParseE
       if (typeNumber.isErr()) return Result.err(typeNumber.error);
       const stored = store(typeNumber.value, applied.value, delta.offset);
       if (stored.isErr()) return Result.err(stored.error);
+      if (foundTargets()) return Result.ok(bySha);
       resolved++;
     }
     if (resolved === 0) {
