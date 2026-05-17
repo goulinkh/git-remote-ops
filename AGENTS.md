@@ -6,14 +6,14 @@ contributor-internal lore (parser invariants, harness boot), see `docs/`.
 ## What this library is
 
 Read-only Git client over smart HTTP. No `.git` dir, no subprocess, no working tree. Fetches one
-commit / one tree / one blob from a remote and hands back decoded bytes.
+commit / one tree / one blob from a remote and stores decoded objects in caller-supplied `storeDir`.
 
 ## What it is NOT
 
 - Not a `git` replacement. No push, no working tree, no ref writes, no merges.
 - Not a clone manager. No `have` negotiation, no incremental sync — every fetch is from-scratch with
   `done`.
-- Not streaming. Packs are held in memory in full.
+- Not a fully streaming parser. Extracted packs are loaded in memory during parse.
 
 If consumer needs writes or full clones, shell out to `git` instead.
 
@@ -23,7 +23,7 @@ If consumer needs writes or full clones, shell out to `git` instead.
 import { RemoteGit } from "jsr:@local/git-remote-ops";
 ```
 
-Deno only. Requires `--allow-net`.
+Deno only. Requires `--allow-net`, plus `--allow-read --allow-write` for object store access.
 
 CLI:
 
@@ -37,17 +37,17 @@ One class. All methods async. All return `Result<T, GitRemoteOpsError>` from
 [`better-result`](https://jsr.io/@local/better-result) — never throw.
 
 ```ts
-const client = new RemoteGit(url, { logger? , diagnostic? });
+const client = new RemoteGit(url, { storeDir, logger?, diagnostic? });
 
 await client.discover();      // -> ServerProfile
 await client.probe(verbose?); // -> ServerProfile (filter probe)
 await client.lsRefs();        // -> Map<refName, sha>
 await client.resolveRef(ref); // -> sha
-await client.fetchCommit(ref, { depth?, filter?, parseFull? });
+await client.fetchCommit(ref, { depth?, filter?, parseScope? });
 await client.fetchBlob(sha);
 await client.fetchTree(sha);
 await client.fetchTreeForCommit(ref, opts);
-client.getObject(sha);        // cache lookup, no network
+await client.getObject(sha);  // disk store lookup, no network
 ```
 
 ## Result handling
@@ -71,26 +71,26 @@ if you want exceptions.
 
 ## Caching behaviour consumers should know
 
-One `RemoteGit` instance keeps:
+`RemoteGit` keeps one `ServerProfile` in memory. Objects live on disk under `storeDir`:
 
-- One `ServerProfile` — populated on first call, reused after.
-- All materialized objects in a `Map<sha, GitObject>`, **process-lifetime**.
+- `objects/<aa>/<rest>` — Git-compatible loose objects.
+- `incoming/` — transient raw responses and extracted packs.
+- `snapshots/` — depth-1 snapshot markers.
 
 Implications:
 
-- Reuse instances across calls — commit → tree → blob dedupes `want`s.
-- Don't hold an instance forever in long-running processes if memory matters. Throw it away when
-  done with that remote.
-- Concurrent calls on one instance share the cache; no internal locking.
+- Reuse `storeDir` across calls/processes — commit → tree → blob dedupes `want`s from disk.
+- `getObject` is async because it reads the loose-object store.
+- Concurrent writers rely on atomic temp-file rename only; no lockfile yet.
 
 ## Choosing options
 
-| Goal                        | Recipe                                                                        |
-| --------------------------- | ----------------------------------------------------------------------------- |
-| One commit's metadata       | `fetchCommit(ref, { depth: 1, filter: "blob:none" })`                         |
-| List files at snapshot      | `fetchTreeForCommit(ref, { depth: 1, filter: "blob:none", parseFull: true })` |
-| One known blob              | `fetchBlob(sha)` (no profile probe needed)                                    |
-| Path → blob without network | `resolvePathToBlob` from `objects/tree.ts` against `client` object cache      |
+| Goal                        | Recipe                                                                               |
+| --------------------------- | ------------------------------------------------------------------------------------ |
+| One commit's metadata       | `fetchCommit(ref, { depth: 1, filter: "blob:none" })`                                |
+| List files at snapshot      | `fetchTreeForCommit(ref, { depth: 1, filter: "blob:none" })`                         |
+| One known blob              | `fetchBlob(sha)` (no profile probe needed)                                           |
+| Path → blob without network | read trees from `getObject` / `LooseObjectStore`, then use `objects/tree.ts` helpers |
 
 `depth: 1` + `filter: "blob:none"` is the cheap default. Both gracefully degrade if server doesn't
 advertise the capability — depth drops, filter logs at info and proceeds.
@@ -103,7 +103,7 @@ Library silent unless told otherwise.
 import { Logger } from "jsr:@local/git-remote-ops";
 
 const logger = new Logger({ level: "debug" });
-const client = new RemoteGit(url, { logger });
+const client = new RemoteGit(url, { logger, storeDir });
 // ...
 console.error(logger.summary()); // metrics table
 ```
@@ -122,7 +122,7 @@ git-remote-ops list-files  <url> [--ref HEAD] [--depth N] [--filter SPEC | --no-
                                  [--details]
 git-remote-ops cat-blob    <url> <blob-sha>
 
-Global: -q | -v | --debug | --stats
+Global: --store-dir <path> | -q | -v | --debug | --stats
 ```
 
 Stdout = data. Stderr = logs + errors. Exit 1 on any `Result.err`.
@@ -132,8 +132,8 @@ Full reference: `docs/cli.md`.
 ## Common pitfalls
 
 **Calling `fetchTree(commit.tree)` after `fetchCommit(ref)` with default options.** Default
-`parseFull: false` only materializes the commit itself. Use `fetchTreeForCommit` or pass
-`{ parseFull: true }` to `fetchCommit`.
+`parseScope: "target"` only materializes the commit itself. Use `fetchTreeForCommit` or pass
+`{ parseScope: "all" }` to `fetchCommit`.
 
 **Expecting full history.** `depth: 1` (the CLI default) gives one commit. Drop depth for full
 history; expect a much larger pack.
@@ -141,11 +141,10 @@ history; expect a much larger pack.
 **Treating `RefNotFoundError` as fatal.** A 40-char hex sha is accepted even when not in the ad —
 try direct sha if your ref is unusual.
 
-**Confusing `getObject` with a fetch.** `getObject` only checks the cache. Returns `undefined` if
-not yet materialized. No network call.
+**Confusing `getObject` with a fetch.** `getObject` only checks the disk store. Returns `undefined`
+if not yet materialized. No network call.
 
-**Throwing away the client between calls.** Re-discovers, re-probes, re-fetches the same objects.
-Reuse it.
+**Throwing away `storeDir` between calls.** Re-fetches the same objects. Reuse the directory.
 
 ## Where to look in source
 

@@ -7,14 +7,16 @@ objects you ask for.
 
 ```sh
 # Run from source via Deno tasks
-deno run --allow-net src/cli.ts <command> <url> [options]
+deno run --allow-net --allow-read --allow-write src/cli.ts --store-dir /tmp/gro-cache <command> <url> [options]
 
 # Or install as a binary (requires deno install)
 deno install --global -A -n git-remote-ops src/cli.ts
 git-remote-ops <command> <url> [options]
 ```
 
-Required permission: `--allow-net`.
+Required permissions: `--allow-net --allow-read --allow-write`.
+
+`--store-dir <path>` is required. Reuse the same directory to dedupe objects across runs.
 
 ## Commands
 
@@ -35,7 +37,7 @@ shallow=true
 List refs as `<sha> <name>`, one per line.
 
 ```sh
-git-remote-ops ls-refs https://github.com/owner/repo
+git-remote-ops --store-dir /tmp/gro-cache ls-refs https://github.com/owner/repo
 ```
 
 ### `cat-commit <url> [--ref REF] [--depth N] [--filter SPEC]`
@@ -43,7 +45,7 @@ git-remote-ops ls-refs https://github.com/owner/repo
 Fetch and print a commit. Defaults: `--ref HEAD`, `--depth 1`, `--filter blob:none`.
 
 ```sh
-git-remote-ops cat-commit https://github.com/owner/repo --ref main --depth 1
+git-remote-ops --store-dir /tmp/gro-cache cat-commit https://github.com/owner/repo --ref main --depth 1
 ```
 
 Output:
@@ -68,7 +70,7 @@ Print tree entries as `<mode> <sha> <name>`, one per line.
 Write raw blob bytes to stdout. Pipe to a file for binary content:
 
 ```sh
-git-remote-ops cat-blob https://github.com/owner/repo <sha> > out.bin
+git-remote-ops --store-dir /tmp/gro-cache cat-blob https://github.com/owner/repo <sha> > out.bin
 ```
 
 ## Global Options
@@ -78,6 +80,7 @@ git-remote-ops cat-blob https://github.com/owner/repo <sha> > out.bin
 | `-q`, `--quiet`   | Silent — no logs                                               |
 | `-v`, `--verbose` | Debug logs (HTTP req/resp, pack parse, fetch counts)           |
 | `--debug`         | Trace-level logs (very chatty)                                 |
+| `--store-dir DIR` | Required reusable loose-object cache directory                 |
 | `--stats`         | Print performance/analytics summary on stderr after completion |
 | `-h`, `--help`    | Show top-level or per-command help                             |
 | `-V`, `--version` | Print version                                                  |
@@ -106,7 +109,7 @@ pack bytes, pack parse duration.
 import { Logger, RemoteGit } from "git-remote-ops";
 
 const logger = new Logger({ level: "debug", sink: console.error });
-const git = new RemoteGit(url, { logger });
+const git = new RemoteGit(url, { logger, storeDir: "/tmp/gro-cache" });
 await git.fetchCommit("HEAD");
 console.log(logger.summary());
 console.log(logger.metrics); // structured access
@@ -127,14 +130,14 @@ Levels: `silent` | `info` | `debug` | `trace`. Modules use namespaced child logg
 
 ```sh
 # What does the server support?
-git-remote-ops probe https://github.com/torvalds/linux
+git-remote-ops --store-dir /tmp/gro-cache probe https://github.com/torvalds/linux
 
 # HEAD commit metadata only, no blobs
-git-remote-ops cat-commit https://github.com/torvalds/linux
+git-remote-ops --store-dir /tmp/gro-cache cat-commit https://github.com/torvalds/linux
 
 # Dump a specific tree
-git-remote-ops cat-tree https://github.com/owner/repo abc123...
+git-remote-ops --store-dir /tmp/gro-cache cat-tree https://github.com/owner/repo --tree-sha abc123...
 
 # Save a blob to disk
-git-remote-ops cat-blob https://github.com/owner/repo def456... > file.txt
+git-remote-ops --store-dir /tmp/gro-cache cat-blob https://github.com/owner/repo def456... > file.txt
 ```

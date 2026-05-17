@@ -7,6 +7,7 @@
  */
 export { RemoteGit } from "./client.ts";
 export { Logger, NULL_LOGGER } from "./logger.ts";
+export { LooseObjectStore } from "./store.ts";
 export type { LoggerOptions, LogLevel, Metrics } from "./logger.ts";
 export {
   ObjectDecodeError,

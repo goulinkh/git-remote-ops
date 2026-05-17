@@ -5,34 +5,38 @@
  * transport, protocol, and pack layers behind a small surface: discover a
  * server, ask for commits/trees/blobs, get them back as decoded objects.
  *
- * The client caches:
- *  - a single {@link ServerProfile} (capabilities + ref advertisement);
- *  - every object materialized by any prior fetch, in a process-lifetime
- *    map. Subsequent fetches dedupe wants against this map so multi-step
- *    workflows (commit → tree → blob) only pay for what's new.
+ * The client caches a single {@link ServerProfile}; objects are stored in the
+ * caller-supplied loose-object directory and deduped across calls by SHA.
  */
 import { Result } from "better-result";
 import type { GitRemoteOpsError } from "./errors.ts";
-import { ObjectDecodeError, ObjectNotFoundError, RefNotFoundError } from "./errors.ts";
+import {
+  ObjectDecodeError,
+  ObjectNotFoundError,
+  PackParseError,
+  RefNotFoundError,
+} from "./errors.ts";
 import { Logger } from "./logger.ts";
 import type {
   CommitInfo,
   DiagnosticFn,
   FetchCommitOptions,
   GitObject,
-  GitObjectMap,
+  GitObjectType,
+  PackParseScope,
   RemoteGitOptions,
   ServerProfile,
   TreeEntry,
 } from "./types.ts";
 import { parseCommit, parseTree } from "./objects/index.ts";
-import { parsePackfile } from "./pack/index.ts";
+import { type ParsedPackfile, parsePackfile } from "./pack/index.ts";
 import {
   buildFetchRequest,
-  extractPack,
+  extractPackToFile,
   parseRefAdvertisement,
   parseV2CapabilityAdvertisement,
 } from "./protocol/index.ts";
+import { LooseObjectStore } from "./store.ts";
 import { getSmartHttp, postUploadPack } from "./transport.ts";
 
 /**
@@ -52,6 +56,10 @@ const DEFAULT_CAPS = [
   "ofs-delta",
   "agent=git-remote-ops-deno/0.1",
 ];
+
+type PackFile = { path: string; length: number };
+
+const TREE_RETAIN_TYPES: ReadonlySet<GitObjectType> = new Set(["commit", "tree"]);
 
 function fail<T>(error: GitRemoteOpsError): Result<T, GitRemoteOpsError> {
   return Result.err<T, GitRemoteOpsError>(error);
@@ -76,8 +84,7 @@ export class RemoteGit {
   readonly url: string;
   readonly logger: Logger;
   private profile: ServerProfile | null = null;
-  private objects: GitObjectMap = new Map();
-  private snapshotCommits = new Set<string>();
+  private store: LooseObjectStore;
   private diagnostic?: DiagnosticFn;
   private transportLogger: Logger;
   private packLogger: Logger;
@@ -85,17 +92,17 @@ export class RemoteGit {
   /**
    * @param url Base repository URL (e.g. `https://github.com/owner/repo.git`).
    *   Trailing slashes are stripped.
-   * @param options Optional logger / diagnostic sink. When neither is given, a
-   *   silent logger is used. Passing `diagnostic` alone gets you a `debug`
-   *   logger routed to the diagnostic function.
+   * @param options Required object store directory plus optional logger / diagnostic sink. When no
+   *   logger is given, a silent logger is used. Passing `diagnostic` alone gets you a `debug` logger.
    */
-  constructor(url: string, options?: RemoteGitOptions) {
+  constructor(url: string, options: RemoteGitOptions) {
     this.url = url.replace(/\/+$/, "");
-    this.diagnostic = options?.diagnostic;
-    this.logger = options?.logger ??
+    this.store = new LooseObjectStore(options.storeDir);
+    this.diagnostic = options.diagnostic;
+    this.logger = options.logger ??
       new Logger({
-        level: options?.diagnostic ? "debug" : "silent",
-        sink: options?.diagnostic,
+        level: options.diagnostic ? "debug" : "silent",
+        sink: options.diagnostic,
       }, "client");
     this.transportLogger = this.logger.child("transport");
     this.packLogger = this.logger.child("pack");
@@ -228,14 +235,14 @@ export class RemoteGit {
         `server does not advertise object filters; fetching without ${options.filter}`,
       );
     }
-    const objects = await this.fetchObjects(
+    const fetched = await this.fetchObjects(
       [commitSha.value],
       depth,
       filter,
-      options.parseFull === true,
+      options.parseScope ?? "target",
     );
-    if (objects.isErr()) return fail(objects.error);
-    const object = requiredObject(objects.value, commitSha.value);
+    if (fetched.isErr()) return fail(fetched.error);
+    const object = await this.requiredObject(commitSha.value);
     if (object.isErr()) return fail(object.error);
     if (object.value.type !== "commit") {
       return fail(
@@ -256,9 +263,9 @@ export class RemoteGit {
   async fetchBlob(sha: string): Promise<Result<Uint8Array, GitRemoteOpsError>> {
     const profile = this.profile ? Result.ok(this.profile) : await this.discover();
     if (profile.isErr()) return fail(profile.error);
-    const objects = await this.fetchObjects([sha]);
-    if (objects.isErr()) return fail(objects.error);
-    const object = requiredObject(objects.value, sha);
+    const fetched = await this.fetchObjects([sha]);
+    if (fetched.isErr()) return fail(fetched.error);
+    const object = await this.requiredObject(sha);
     if (object.isErr()) return fail(object.error);
     if (object.value.type !== "blob") {
       return fail(
@@ -276,9 +283,8 @@ export class RemoteGit {
   /**
    * Fetch the commit at `ref` *and* its root tree from a single snapshot pack.
    *
-   * Forces `parseFull: true` so the tree object — which the commit references
-   * but doesn't `want` directly — ends up in the local object store. Useful
-   * for "list files at HEAD" without a clone.
+   * Uses tree retention so the tree object — which the commit references but
+   * doesn't `want` directly — ends up in the local object store without blobs.
    */
   async fetchTreeForCommit(
     ref: string,
@@ -286,28 +292,21 @@ export class RemoteGit {
   ): Promise<
     Result<{ commit: CommitInfo; commitSha: string; entries: TreeEntry[] }, GitRemoteOpsError>
   > {
-    const commit = await this.fetchCommit(ref, { ...options, parseFull: true });
+    const commit = await this.fetchCommit(ref, { ...options, parseScope: "trees" });
     if (commit.isErr()) return fail(commit.error);
-    const treeObject = this.objects.get(commit.value.commit.tree);
-    if (!treeObject) {
-      return fail(
-        new ObjectNotFoundError({
-          sha: commit.value.commit.tree,
-          message: `tree ${commit.value.commit.tree} not present in snapshot pack`,
-        }),
-      );
-    }
-    if (treeObject.type !== "tree") {
+    const treeObject = await this.requiredObject(commit.value.commit.tree);
+    if (treeObject.isErr()) return fail(treeObject.error);
+    if (treeObject.value.type !== "tree") {
       return fail(
         new ObjectDecodeError({
           reason: "unexpected-object-type",
           message: `object is not a tree: ${commit.value.commit.tree}`,
-          objectType: treeObject.type,
+          objectType: treeObject.value.type,
           sha: commit.value.commit.tree,
         }),
       );
     }
-    const entries = parseTree(treeObject.content);
+    const entries = parseTree(treeObject.value.content);
     if (entries.isErr()) return fail(entries.error);
     return Result.ok({
       commit: commit.value.commit,
@@ -320,9 +319,9 @@ export class RemoteGit {
   async fetchTree(sha: string): Promise<Result<TreeEntry[], GitRemoteOpsError>> {
     const profile = this.profile ? Result.ok(this.profile) : await this.discover();
     if (profile.isErr()) return fail(profile.error);
-    const objects = await this.fetchObjects([sha]);
-    if (objects.isErr()) return fail(objects.error);
-    const object = requiredObject(objects.value, sha);
+    const fetched = await this.fetchObjects([sha]);
+    if (fetched.isErr()) return fail(fetched.error);
+    const object = await this.requiredObject(sha);
     if (object.isErr()) return fail(object.error);
     if (object.value.type !== "tree") {
       return fail(
@@ -340,48 +339,86 @@ export class RemoteGit {
   }
 
   /** Look up an already-materialized object by sha. Does not fetch on miss. */
-  getObject(sha: string): GitObject | undefined {
-    return this.objects.get(sha);
+  async getObject(sha: string): Promise<GitObject | undefined> {
+    const object = await this.store.read(sha);
+    return object.isOk() ? object.value : undefined;
+  }
+
+  private async requiredObject(sha: string): Promise<Result<GitObject, GitRemoteOpsError>> {
+    const object = await this.store.read(sha);
+    if (object.isErr()) return fail(object.error);
+    return object;
   }
 
   private async fetchObjects(
     wants: string[],
     depth?: number,
     filterSpec?: string,
-    parseFull = false,
-  ): Promise<Result<GitObjectMap, GitRemoteOpsError>> {
-    const normalized = this.normalizeWants(wants, depth, filterSpec);
-    if (normalized.length === 0) {
-      return Result.ok(this.objects);
-    }
+    parseScope: PackParseScope = "target",
+  ): Promise<Result<number, GitRemoteOpsError>> {
+    const normalized = await this.normalizeWants(wants, depth, filterSpec);
+    if (normalized.length === 0) return Result.ok(0);
     this.logger.debug(
       `fetchObjects wants=${normalized.length} depth=${depth ?? "-"} filter=${filterSpec ?? "-"}`,
     );
     const pack = await this.fetchPack(normalized, depth, filterSpec);
     if (pack.isErr()) return fail(pack.error);
     const parseStart = performance.now();
-    const targets = !parseFull && normalized.length === 1 ? new Set(normalized) : undefined;
-    const parsed = parsePackfile(pack.value, targets);
+    const targets = parseScope === "target" && normalized.length === 1
+      ? new Set(normalized)
+      : undefined;
+    const retainTypes = parseScope === "trees" ? TREE_RETAIN_TYPES : undefined;
+    const parsed = await this.parsePackFile(pack.value, { targets, retainTypes }, (sha, object) => {
+      const written = this.store.writeSync(object.type, object.content);
+      if (written.isErr()) {
+        return Result.err(
+          new PackParseError({
+            reason: "store-write-failed",
+            message: `failed to write object ${sha}`,
+            cause: written.error,
+          }),
+        );
+      }
+      return Result.ok(undefined);
+    });
     const parseMs = performance.now() - parseStart;
     if (parsed.isErr()) return fail(parsed.error);
-    const counts = countByType(parsed.value);
+    const counts = parsed.value.stats.byType;
     this.packLogger.recordPack({
       bytes: pack.value.length,
       durationMs: parseMs,
       byType: counts,
     });
     this.packLogger.debug(
-      `parsed ${parsed.value.size} objects (${counts.commit}c/${counts.tree}t/${counts.blob}b/${counts.tag}T) in ${
+      `parsed ${parsed.value.stats.materialized} objects, retained ${parsed.value.stats.retained} (${counts.commit}c/${counts.tree}t/${counts.blob}b/${counts.tag}T) in ${
         parseMs.toFixed(1)
       }ms`,
     );
-    for (const [sha, object] of parsed.value) {
-      this.objects.set(sha, object);
-    }
     if (depth === 1 && filterSpec === undefined) {
-      for (const sha of normalized) this.snapshotCommits.add(sha);
+      for (const sha of normalized) await this.store.markSnapshot(sha);
     }
-    return Result.ok(this.objects);
+    return Result.ok(parsed.value.stats.retained);
+  }
+
+  private async parsePackFile(
+    pack: PackFile,
+    options?: Parameters<typeof parsePackfile>[1],
+    sink?: Parameters<typeof parsePackfile>[2],
+  ): Promise<Result<ParsedPackfile, GitRemoteOpsError>> {
+    try {
+      const packBytes = await Deno.readFile(pack.path);
+      return parsePackfile(packBytes, options, sink);
+    } catch (cause) {
+      return fail(
+        new PackParseError({
+          reason: "pack-read-failed",
+          message: `failed to read pack file: ${pack.path}`,
+          cause,
+        }),
+      );
+    } finally {
+      await removeIfExists(pack.path);
+    }
   }
 
   private async probeFilter(
@@ -395,11 +432,11 @@ export class RemoteGit {
     if (blobNonePack.isErr()) {
       if (verbose) this.log(`filter blob:none probe failed: ${blobNonePack.error}`);
     } else {
-      const parsed = parsePackfile(blobNonePack.value);
+      const parsed = await this.parsePackFile(blobNonePack.value);
       if (parsed.isErr()) {
         if (verbose) this.log(`filter blob:none probe failed: ${parsed.error}`);
       } else {
-        const counts = countByType(parsed.value);
+        const counts = parsed.value.stats.byType;
         if (verbose) this.log(`filter blob:none probe: ${counts.tree} trees, ${counts.blob} blobs`);
         profile.supportsFilterBlobNone = counts.blob === 0 ||
           counts.blob < Math.floor(counts.tree / 4);
@@ -410,11 +447,11 @@ export class RemoteGit {
     if (tree0Pack.isErr()) {
       if (verbose) this.log(`filter tree:0 probe failed: ${tree0Pack.error}`);
     } else {
-      const parsed = parsePackfile(tree0Pack.value);
+      const parsed = await this.parsePackFile(tree0Pack.value);
       if (parsed.isErr()) {
         if (verbose) this.log(`filter tree:0 probe failed: ${parsed.error}`);
       } else {
-        const counts = countByType(parsed.value);
+        const counts = parsed.value.stats.byType;
         profile.supportsFilterTree0 = counts.tree === 0;
       }
     }
@@ -425,7 +462,7 @@ export class RemoteGit {
     depth?: number,
     filterSpec?: string,
     caps?: string[],
-  ): Promise<Result<Uint8Array, GitRemoteOpsError>> {
+  ): Promise<Result<PackFile, GitRemoteOpsError>> {
     const protocolVersion = this.profile?.protocolVersion ?? 0;
     const requestCaps = caps ?? buildCaps({
       shallow: depth !== undefined,
@@ -439,22 +476,34 @@ export class RemoteGit {
       protocolVersion,
     });
     if (body.isErr()) return fail(body.error);
-    const response = await postUploadPack(this.url, body.value, {
+    const rawPath = this.store.incomingPath(".raw");
+    const packPath = this.store.incomingPath(".pack");
+    const response = await postUploadPack(this.url, body.value, rawPath, {
       protocolVersion,
       logger: this.transportLogger,
     });
     if (response.isErr()) return fail(response.error);
-    const pack = extractPack(response.value.body, this.diagnostic);
-    if (pack.isErr()) return fail(pack.error);
-    this.packLogger.debug(`extracted pack: ${pack.value.length}B`);
-    return Result.ok(pack.value);
+    const pack = await extractPackToFile(response.value.path, packPath, this.diagnostic);
+    await removeIfExists(response.value.path);
+    if (pack.isErr()) {
+      await removeIfExists(packPath);
+      return fail(pack.error);
+    }
+    this.packLogger.debug(`extracted pack: ${pack.value}B`);
+    return Result.ok({ path: packPath, length: pack.value });
   }
 
-  private normalizeWants(wants: string[], depth?: number, filterSpec?: string): string[] {
+  private async normalizeWants(
+    wants: string[],
+    depth?: number,
+    filterSpec?: string,
+  ): Promise<string[]> {
     if (depth === 1 && filterSpec === undefined) {
-      return wants.every((want) => this.snapshotCommits.has(want)) ? [] : wants;
+      const present = await Promise.all(wants.map((want) => this.store.hasSnapshot(want)));
+      return present.every(Boolean) ? [] : wants;
     }
-    return wants.filter((want) => !this.objects.has(want));
+    const present = await Promise.all(wants.map((want) => this.store.has(want)));
+    return wants.filter((_, index) => !present[index]);
   }
 
   private pickProbeSha(profile: ServerProfile): Result<string, GitRemoteOpsError> {
@@ -472,16 +521,10 @@ export class RemoteGit {
   }
 }
 
-function requiredObject(objects: GitObjectMap, sha: string): Result<GitObject, GitRemoteOpsError> {
-  const object = objects.get(sha);
-  if (!object) {
-    return fail(new ObjectNotFoundError({ sha, message: `object not found: ${sha}` }));
+async function removeIfExists(path: string): Promise<void> {
+  try {
+    await Deno.remove(path);
+  } catch (cause) {
+    if (!(cause instanceof Deno.errors.NotFound)) throw cause;
   }
-  return Result.ok(object);
-}
-
-function countByType(objects: GitObjectMap): Record<"commit" | "tree" | "blob" | "tag", number> {
-  const counts = { commit: 0, tree: 0, blob: 0, tag: 0 };
-  for (const obj of objects.values()) counts[obj.type]++;
-  return counts;
 }

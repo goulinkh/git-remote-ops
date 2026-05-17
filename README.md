@@ -2,18 +2,19 @@
 
 **Read-only Git over smart HTTP, without `git`.** A single Deno/TypeScript process speaks the same
 wire protocol that `git fetch` does, then materializes the parts you actually want — one commit, one
-tree, one file — straight into memory.
+tree, one file — into a caller-supplied loose-object store.
 
-No `.git` directory. No subprocess. No filesystem state to clean up.
+No `.git` directory. No subprocess. Reuse `--store-dir` across invocations to keep downloaded
+objects.
 
 ```bash
-deno run --allow-net jsr:@local/git-remote-ops/cli \
+deno run --allow-net --allow-read --allow-write jsr:@local/git-remote-ops/cli \
+  --store-dir /tmp/git-remote-ops-cache \
   cat-blob https://github.com/torvalds/linux.git \
   e8c39d0f… > Makefile
 ```
 
-The blob lands in `Makefile`. The local working set never grows past a few KB of cached pack
-metadata.
+The blob lands in `Makefile`; its Git object is cached under `/tmp/git-remote-ops-cache/objects/`.
 
 ## Why bother
 
@@ -48,7 +49,9 @@ And the same operations are available as a library:
 ```typescript
 import { RemoteGit } from "jsr:@local/git-remote-ops";
 
-const client = new RemoteGit("https://github.com/owner/repo.git");
+const client = new RemoteGit("https://github.com/owner/repo.git", {
+  storeDir: "/tmp/git-remote-ops-cache",
+});
 const { sha, commit } = (await client.fetchCommit("HEAD")).unwrap();
 const tree = (await client.fetchTree(commit.tree)).unwrap();
 const blob = (await client.fetchBlob(tree[0].sha)).unwrap();
@@ -105,8 +108,8 @@ the first `want`.
 
 **Sideband demux.** The response is itself a stream of pkt-lines; each data line starts with a
 channel byte. Channel 1 is the packfile, channel 2 is human-readable progress, channel 3 is fatal
-stderr. `extractPack` looks at the first real data line, picks the right strategy (raw `PACK`
-signature, sideband, or PACK-search fallback), and returns the concatenated channel-1 bytes.
+stderr. Client fetches stream the HTTP body to `incoming/*.raw`, then `extractPackToFile` writes
+channel-1 bytes to `incoming/*.pack` without concatenating the response in memory.
 
 ### 3. Packfile — `src/pack/`
 
@@ -154,9 +157,12 @@ resolve `path/to/file` to a blob sha without touching the network.
 
 - A `ServerProfile` (refs + capabilities + filter probe results), populated lazily on the first call
   and shared by everything after.
-- Every materialized object, in a process-lifetime `Map`. Subsequent fetches dedupe `want` lists
-  against this map, so a typical commit → tree → blob sequence only pays the network cost for new
-  objects.
+- Every materialized object, as Git-compatible loose objects under `storeDir/objects/<aa>/<rest>`.
+  Subsequent fetches dedupe `want` lists against disk, so cache reuse works across client instances
+  and CLI invocations.
+
+`storeDir/incoming/` holds transient raw responses and pack files during parsing.
+`storeDir/snapshots/` marks depth-1 snapshot wants that have already been fetched.
 
 There's a small bit of negotiation logic: shallow depth is dropped if the server didn't advertise
 `shallow`; filters are dropped (with an info log) if the server didn't advertise `filter`. `probe()`
@@ -191,8 +197,8 @@ The bundled `Logger` does three jobs at once:
 - An aligned summary table for `--stats`.
 
 The library never logs above `info` unless you ask. Pass a configured `Logger` via
-`new RemoteGit(url, { logger })`, or hand it a `diagnostic` callback and the constructor will route
-debug-level lines to it.
+`new RemoteGit(url, { logger, storeDir })`, or hand it a `diagnostic` callback and the constructor
+will route debug-level lines to it.
 
 ## CLI
 
@@ -203,6 +209,7 @@ Global flags:
   -q, --quiet       silent
   -v, --verbose     debug
       --debug       trace
+      --store-dir   reusable loose-object cache directory (required)
       --stats       print metrics summary after completion
 
 probe <url>
@@ -239,8 +246,9 @@ refs. It also makes no attempt to negotiate `have` lines — every request is a 
 with `done`, on the assumption that you're after small slices of remote history rather than
 incrementally syncing a clone.
 
-The packfile is held in memory in full. For large monorepos that fits in practice (kilobytes with
-`blob:none` + `--depth=1`), but a streaming parser would be a reasonable evolution.
+The pack parser still loads each extracted pack file into memory for delta resolution. Snapshot tree
+operations retain only commits and trees, so blobs are not written to the loose-object cache unless
+requested directly. A fully streaming parser remains future work.
 
 ## License
 

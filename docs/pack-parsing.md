@@ -7,11 +7,13 @@ Internal notes on smart-HTTP pack parsing path. Read before touching `src/pack/p
 
 ```
 HTTP body
-  -> extractPack (src/protocol/upload_pack.ts)
-       -> parsePktLines (src/protocol/pkt_line.ts)
-       -> demuxSideband (BAND_PACK channel only)
+  -> storeDir/incoming/*.raw
+  -> extractPackToFile (src/protocol/upload_pack.ts)
+       -> streamed pkt-line parse
+       -> write BAND_PACK channel to storeDir/incoming/*.pack
   -> parsePackfile (src/pack/parser.ts)
        -> per object: readPackObjectHeader + decompressAt (+ applyDelta for delta types)
+       -> optional sink writes loose objects to storeDir/objects/<aa>/<rest>
 ```
 
 ## pkt-line: do NOT strip LF in parser
@@ -57,11 +59,15 @@ used to avoid byteOffset edge cases when passing subarrays into `_processChunk`.
 
 ## parsePackfile shortcuts
 
-- `targets?: Set<string>` argument: when set, parser exits early once all target shas are stored.
-  Used for single-want fetches where we only need the requested object.
-- For `fetchTreeForCommit`, the commit is the only `want` but we also need the tree object stored.
-  Pass `parseFull: true` through `FetchCommitOptions` → `fetchObjects` →
-  `parsePackfile(pack, undefined)` so the loop runs to the last object.
+- `targets?: Set<string>` option: when set, parser exits early once all target shas are
+  materialized. Used for single-want fetches where we only need the requested object.
+- `retainTypes?: Set<GitObjectType>` option: when set, parser still reconstructs objects needed for
+  delta resolution but only returns and sinks retained types.
+- Optional sink argument: called only for retained objects so client code can write loose objects to
+  disk during parse without storing skipped blobs.
+- `fetchTreeForCommit` uses `parseScope: "trees"`, which scans the snapshot pack and retains only
+  commits and trees. Blob bytes may be reconstructed transiently for delta bases, but they are not
+  returned or written to the loose-object store.
 
 ## ofs-delta vs ref-delta
 

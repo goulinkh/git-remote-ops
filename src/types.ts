@@ -15,7 +15,7 @@ export interface GitObject {
   content: Uint8Array;
 }
 
-/** Object store keyed by hex SHA-1. The client keeps a single one of these. */
+/** In-memory object map used by parser and tree helper APIs. */
 export type GitObjectMap = Map<string, GitObject>;
 
 /** One entry in a tree object. `sha` is hex SHA-1. */
@@ -40,18 +40,16 @@ export interface CommitInfo {
   committer?: string;
 }
 
+export type PackParseScope = "target" | "trees" | "all";
+
 /** Knobs accepted by {@link RemoteGit.fetchCommit} and friends. */
 export interface FetchCommitOptions {
   /** Shallow-clone depth. Server must advertise `shallow`; otherwise ignored. */
   depth?: number;
   /** Object filter spec (`"blob:none"`, `"tree:0"`, …). Ignored if unsupported. */
   filter?: string;
-  /**
-   * When true, the parser keeps every object in the pack instead of bailing
-   * out as soon as the requested commit is materialized. Required by
-   * snapshot-style operations that walk into the commit's tree.
-   */
-  parseFull?: boolean;
+  /** Parser retention mode. `trees` keeps commits and trees while skipping blobs. */
+  parseScope?: PackParseScope;
 }
 
 /** Cached server capability profile, populated by `discover()` + `probe()`. */
@@ -73,6 +71,8 @@ export interface ServerProfile {
 
 /** Constructor options for {@link RemoteGit}. */
 export interface RemoteGitOptions {
+  /** Directory where loose objects and transient pack files are stored. */
+  storeDir: string;
   /** Optional callback for low-level diagnostic strings (e.g. server stderr). */
   diagnostic?: DiagnosticFn;
   /** Inject a configured {@link Logger}; otherwise one is built from `diagnostic`. */
@@ -128,6 +128,13 @@ export interface FetchRequestOptions {
 /** What the transport layer returns to the protocol layer. */
 export interface HttpTransportResponse {
   body: Uint8Array;
+  status: number;
+}
+
+/** What streaming transport returns after writing a response to disk. */
+export interface HttpFileTransportResponse {
+  path: string;
+  length: number;
   status: number;
 }
 

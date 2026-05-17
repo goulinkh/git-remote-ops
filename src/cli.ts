@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-net
+#!/usr/bin/env -S deno run --allow-net --allow-read --allow-write
 /**
  * @module cli
  *
@@ -27,6 +27,7 @@ const VERSION = "0.1.0";
 const TREE_MODE = "40000";
 
 interface GlobalFlags {
+  storeDir: string;
   quiet?: boolean;
   verbose?: boolean;
   debug?: boolean;
@@ -45,7 +46,7 @@ function makeClient(url: string, flags: GlobalFlags): { client: RemoteGit; logge
     level: resolveLevel(flags),
     sink: (line: string) => console.error(line),
   }, "client");
-  const client = new RemoteGit(url, { logger });
+  const client = new RemoteGit(url, { logger, storeDir: flags.storeDir });
   return { client, logger };
 }
 
@@ -61,8 +62,8 @@ function maybeStats(logger: Logger, flags: GlobalFlags): void {
   if (flags.stats) console.error(logger.summary());
 }
 
-function cachedTreeEntries(client: RemoteGit, treeSha: string): TreeEntry[] {
-  const object = client.getObject(treeSha);
+async function cachedTreeEntries(client: RemoteGit, treeSha: string): Promise<TreeEntry[]> {
+  const object = await client.getObject(treeSha);
   if (!object) {
     console.error(`[ObjectNotFoundError] tree not present in fetched pack: ${treeSha}`);
     Deno.exit(1);
@@ -79,16 +80,16 @@ function cachedTreeEntries(client: RemoteGit, treeSha: string): TreeEntry[] {
   return entries.value;
 }
 
-function printCachedFiles(
+async function printCachedFiles(
   client: RemoteGit,
   entries: TreeEntry[],
   prefix: string,
   details: boolean,
-): void {
+): Promise<void> {
   for (const entry of entries) {
     const path = prefix ? `${prefix}/${entry.name}` : entry.name;
     if (entry.mode === TREE_MODE) {
-      printCachedFiles(client, cachedTreeEntries(client, entry.sha), path, details);
+      await printCachedFiles(client, await cachedTreeEntries(client, entry.sha), path, details);
     } else {
       console.log(details ? `${entry.mode} ${entry.sha} ${path}` : path);
     }
@@ -105,6 +106,9 @@ await new Command()
   })
   .globalOption("--debug", "Enable trace-level logs to stderr (very chatty).", {
     conflicts: ["quiet"],
+  })
+  .globalOption("--store-dir <path:string>", "Directory for reusable loose-object cache.", {
+    required: true,
   })
   .globalOption("--stats", "Print performance/analytics summary on stderr after completion.")
   .action(function () {
@@ -239,10 +243,9 @@ await new Command()
         await client.fetchTreeForCommit(flags.ref, {
           depth: flags.depth,
           filter,
-          parseFull: true,
         }),
       );
-      printCachedFiles(client, result.entries, "", !!flags.details);
+      await printCachedFiles(client, result.entries, "", !!flags.details);
       maybeStats(logger, flags);
     },
   )

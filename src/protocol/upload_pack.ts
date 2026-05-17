@@ -16,6 +16,7 @@ import { DELIM_PKT, FLUSH_PKT, parsePktLines, pktLine } from "./pkt_line.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+type Bytes = Uint8Array<ArrayBufferLike>;
 
 /** Sideband channel for packfile bytes. */
 const BAND_PACK = 1;
@@ -42,7 +43,7 @@ const CONTROL_PREFIXES = [
 /** Bytes of payload to peek at when matching against {@link CONTROL_PREFIXES}. */
 const CONTROL_PREFIX_PEEK = 16;
 
-function concat(parts: Uint8Array[]): Uint8Array {
+function concat(parts: Bytes[]): Uint8Array {
   const length = parts.reduce((sum, part) => sum + part.length, 0);
   const out = new Uint8Array(length);
   let offset = 0;
@@ -257,7 +258,180 @@ export function extractPack(
   );
 }
 
-function startsWith(bytes: Uint8Array, prefix: Uint8Array): boolean {
+export async function extractPackToFile(
+  srcPath: string,
+  destPath: string,
+  diagnostic?: DiagnosticFn,
+): Promise<Result<number, PktLineError | UploadPackError>> {
+  const source = await Deno.open(srcPath, { read: true });
+  const dest = await Deno.open(destPath, { create: true, write: true, truncate: true });
+  let pending: Bytes = new Uint8Array();
+  let wrote = 0;
+  let rawPack = false;
+  let sawData = false;
+  const errors: Bytes[] = [];
+
+  try {
+    for await (const chunk of source.readable) {
+      if (rawPack) {
+        await writeAll(dest, chunk);
+        wrote += chunk.length;
+        continue;
+      }
+      pending = concat([pending, chunk]);
+      const processed = await processPending(dest, pending, errors, diagnostic);
+      if (processed.isErr()) return Result.err(processed.error);
+      pending = processed.value.pending;
+      wrote += processed.value.wrote;
+      rawPack = processed.value.rawPack;
+      sawData = sawData || processed.value.sawData;
+    }
+    if (rawPack && pending.length > 0) {
+      await writeAll(dest, pending);
+      wrote += pending.length;
+      pending = new Uint8Array();
+    }
+    if (!rawPack && pending.length > 0) {
+      const idx = indexOfBytes(pending, PACK_SIGNATURE);
+      if (idx >= 0) {
+        const data = pending.subarray(idx);
+        await writeAll(dest, data);
+        wrote += data.length;
+        sawData = true;
+        pending = new Uint8Array();
+      }
+    }
+    if (errors.length > 0) diagnostic?.(`server stderr: ${decoder.decode(concat(errors))}`);
+    if (!sawData && wrote === 0) {
+      return Result.err(
+        new UploadPackError({
+          reason: "missing-data-pkt-line",
+          message: "no data in upload-pack response",
+        }),
+      );
+    }
+    return Result.ok(wrote);
+  } finally {
+    closeIfOpen(dest);
+  }
+}
+
+function closeIfOpen(file: Deno.FsFile): void {
+  try {
+    file.close();
+  } catch (cause) {
+    if (!(cause instanceof Deno.errors.BadResource)) throw cause;
+  }
+}
+
+async function processPending(
+  dest: Deno.FsFile,
+  input: Bytes,
+  errors: Bytes[],
+  diagnostic?: DiagnosticFn,
+): Promise<
+  Result<
+    { pending: Bytes; wrote: number; rawPack: boolean; sawData: boolean },
+    PktLineError | UploadPackError
+  >
+> {
+  let offset = 0;
+  let wrote = 0;
+  let rawPack = false;
+  let sawData = false;
+
+  if (startsWith(input, PACK_SIGNATURE)) {
+    await writeAll(dest, input);
+    return Result.ok({
+      pending: new Uint8Array(),
+      wrote: input.length,
+      rawPack: true,
+      sawData: true,
+    });
+  }
+
+  while (offset < input.length) {
+    if (input.length - offset < 4) break;
+    const lengthText = decoder.decode(input.subarray(offset, offset + 4));
+    if (!/^[0-9a-fA-F]{4}$/.test(lengthText)) {
+      const idx = indexOfBytes(input.subarray(offset), PACK_SIGNATURE);
+      if (idx >= 0) {
+        const data = input.subarray(offset + idx);
+        await writeAll(dest, data);
+        wrote += data.length;
+        rawPack = true;
+        sawData = true;
+        offset = input.length;
+        break;
+      }
+      return Result.err(
+        new PktLineError({
+          reason: "invalid-length-prefix",
+          message: `invalid pkt-line length: ${lengthText}`,
+          offset,
+        }),
+      );
+    }
+    const length = parseInt(lengthText, 16);
+    if (length === 0 || length === 1 || length === 2) {
+      offset += 4;
+      continue;
+    }
+    if (length < 4) {
+      return Result.err(
+        new PktLineError({
+          reason: "invalid-length-prefix",
+          message: `invalid pkt-line length: ${lengthText}`,
+          offset,
+        }),
+      );
+    }
+    if (input.length - offset < length) break;
+    const payload = input.subarray(offset + 4, offset + length);
+    offset += length;
+    if (payload.length === 0) continue;
+    const head = decoder.decode(payload.subarray(0, Math.min(payload.length, CONTROL_PREFIX_PEEK)));
+    if (CONTROL_PREFIXES.some((prefix) => head.startsWith(prefix))) continue;
+    if (startsWith(payload, PACK_SIGNATURE)) {
+      await writeAll(dest, payload);
+      wrote += payload.length;
+      sawData = true;
+      continue;
+    }
+    if (payload[0] === BAND_PACK) {
+      const data = payload.subarray(1);
+      await writeAll(dest, data);
+      wrote += data.length;
+      sawData = true;
+      continue;
+    }
+    if (payload[0] === BAND_PROGRESS) continue;
+    if (payload[0] === BAND_ERROR) {
+      errors.push(payload.subarray(1));
+      diagnostic?.(`server stderr: ${decoder.decode(payload.subarray(1))}`);
+      continue;
+    }
+    return Result.err(
+      new UploadPackError({
+        reason: "unrecognized-data-pkt-line",
+        message: `unrecognized data pkt-line (starts with ${
+          Array.from(payload.subarray(0, 8)).join(",")
+        })`,
+      }),
+    );
+  }
+
+  return Result.ok({ pending: input.subarray(offset), wrote, rawPack, sawData });
+}
+
+async function writeAll(file: Deno.FsFile, bytes: Bytes): Promise<void> {
+  let offset = 0;
+  while (offset < bytes.length) {
+    offset += await file.write(bytes.subarray(offset));
+  }
+}
+
+function startsWith(bytes: Bytes, prefix: Bytes): boolean {
   if (bytes.length < prefix.length) return false;
   for (let i = 0; i < prefix.length; i++) {
     if (bytes[i] !== prefix[i]) return false;
@@ -265,7 +439,7 @@ function startsWith(bytes: Uint8Array, prefix: Uint8Array): boolean {
   return true;
 }
 
-function indexOfBytes(haystack: Uint8Array, needle: Uint8Array): number {
+function indexOfBytes(haystack: Bytes, needle: Bytes): number {
   outer: for (let i = 0; i <= haystack.length - needle.length; i++) {
     for (let j = 0; j < needle.length; j++) {
       if (haystack[i + j] !== needle[j]) continue outer;

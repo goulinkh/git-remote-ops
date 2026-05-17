@@ -1,7 +1,7 @@
 /**
  * @module pack-parser
  *
- * Decode an in-memory packfile into a `sha → GitObject` map.
+ * Decode an in-memory packfile and optionally sink each materialized object.
  *
  * The parser handles the four loose-object types directly and resolves both
  * delta encodings (`OBJ_OFS_DELTA`, `OBJ_REF_DELTA`) by applying
@@ -81,6 +81,29 @@ function typeNumberOf(type: GitObjectType): Result<number, PackParseError> {
     );
   }
   return Result.ok(num);
+}
+
+export type PackObjectSink = (
+  sha: string,
+  object: GitObject,
+) => Result<void, PackParseError>;
+
+export interface ParsePackfileOptions {
+  targets?: ReadonlySet<string>;
+  retainTypes?: ReadonlySet<GitObjectType>;
+}
+
+export interface PackParseStats {
+  scanned: number;
+  materialized: number;
+  retained: number;
+  byType: Record<GitObjectType, number>;
+  skippedByType: Record<GitObjectType, number>;
+}
+
+export interface ParsedPackfile {
+  objects: GitObjectMap;
+  stats: PackParseStats;
 }
 
 interface RefDelta {
@@ -206,8 +229,9 @@ export function decompressAt(
  */
 export function parsePackfile(
   pack: Uint8Array,
-  targets?: ReadonlySet<string>,
-): Result<GitObjectMap, PackParseError> {
+  options: ParsePackfileOptions = {},
+  sink?: PackObjectSink,
+): Result<ParsedPackfile, PackParseError> {
   if (pack.length < PACK_HEADER_SIZE + PACK_TRAILER_SIZE) {
     return Result.err(
       new PackParseError({
@@ -241,10 +265,26 @@ export function parsePackfile(
     );
   }
 
-  const bySha = new Map<string, GitObject>();
-  const byOffset = new Map<number, GitObject>();
+  const retainedBySha = new Map<string, GitObject>();
+  const baseBySha = new Map<string, GitObject>();
+  const baseByOffset = new Map<number, GitObject>();
+  const stats: PackParseStats = {
+    scanned: 0,
+    materialized: 0,
+    retained: 0,
+    byType: { commit: 0, tree: 0, blob: 0, tag: 0 },
+    skippedByType: { commit: 0, tree: 0, blob: 0, tag: 0 },
+  };
   let offset = PACK_HEADER_SIZE;
   let pendingRefDeltas: RefDelta[] = [];
+
+  function currentResult(): ParsedPackfile {
+    return { objects: retainedBySha, stats };
+  }
+
+  function shouldRetain(type: GitObjectType): boolean {
+    return options.retainTypes === undefined || options.retainTypes.has(type);
+  }
 
   function store(
     typeNumber: number,
@@ -264,16 +304,29 @@ export function parsePackfile(
     const sha = sha1OfObject(typeNumber, content);
     if (sha.isErr()) return Result.err(sha.error);
     const object = { type, content };
-    bySha.set(sha.value, object);
-    byOffset.set(objectOffset, object);
+    stats.materialized++;
+    baseBySha.set(sha.value, object);
+    baseByOffset.set(objectOffset, object);
+    if (shouldRetain(type)) {
+      retainedBySha.set(sha.value, object);
+      stats.retained++;
+      stats.byType[type]++;
+      if (sink) {
+        const written = sink(sha.value, object);
+        if (written.isErr()) return Result.err(written.error);
+      }
+    } else {
+      stats.skippedByType[type]++;
+    }
     return Result.ok(sha.value);
   }
 
   function foundTargets(): boolean {
-    return targets !== undefined && [...targets].every((sha) => bySha.has(sha));
+    return options.targets !== undefined && [...options.targets].every((sha) => baseBySha.has(sha));
   }
 
   for (let i = 0; i < count; i++) {
+    stats.scanned++;
     const objectOffset = offset;
     const header = readPackObjectHeader(pack, offset);
     if (header.isErr()) return Result.err(header.error);
@@ -283,13 +336,13 @@ export function parsePackfile(
       if (result.isErr()) return Result.err(result.error);
       const stored = store(header.value.type, result.value.value, objectOffset);
       if (stored.isErr()) return Result.err(stored.error);
-      if (foundTargets()) return Result.ok(bySha);
+      if (foundTargets()) return Result.ok(currentResult());
       offset = result.value.offset;
     } else if (header.value.type === OBJ_OFS_DELTA) {
       const varint = readVarintBe(pack, offset);
       if (varint.isErr()) return Result.err(varint.error);
       offset = varint.value.offset;
-      const base = byOffset.get(objectOffset - varint.value.value);
+      const base = baseByOffset.get(objectOffset - varint.value.value);
       if (!base) {
         return Result.err(
           new PackParseError({
@@ -307,7 +360,7 @@ export function parsePackfile(
       if (typeNumber.isErr()) return Result.err(typeNumber.error);
       const stored = store(typeNumber.value, applied.value, objectOffset);
       if (stored.isErr()) return Result.err(stored.error);
-      if (foundTargets()) return Result.ok(bySha);
+      if (foundTargets()) return Result.ok(currentResult());
       offset = result.value.offset;
     } else if (header.value.type === OBJ_REF_DELTA) {
       if (offset + REF_DELTA_SHA_SIZE > pack.length) {
@@ -340,7 +393,7 @@ export function parsePackfile(
     const remaining: RefDelta[] = [];
     let resolved = 0;
     for (const delta of pendingRefDeltas) {
-      const base = bySha.get(delta.baseSha);
+      const base = baseBySha.get(delta.baseSha);
       if (!base) {
         remaining.push(delta);
         continue;
@@ -351,7 +404,7 @@ export function parsePackfile(
       if (typeNumber.isErr()) return Result.err(typeNumber.error);
       const stored = store(typeNumber.value, applied.value, delta.offset);
       if (stored.isErr()) return Result.err(stored.error);
-      if (foundTargets()) return Result.ok(bySha);
+      if (foundTargets()) return Result.ok(currentResult());
       resolved++;
     }
     if (resolved === 0) {
@@ -367,5 +420,7 @@ export function parsePackfile(
     pendingRefDeltas = remaining;
   }
 
-  return Result.ok(bySha);
+  baseBySha.clear();
+  baseByOffset.clear();
+  return Result.ok(currentResult());
 }

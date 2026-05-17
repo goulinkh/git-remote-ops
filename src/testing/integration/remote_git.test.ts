@@ -26,7 +26,7 @@ describe("RemoteGit compatibility", () => {
       try {
         await createDeterministicRepo(root, profile);
         server = await startGitContainer(profile, root);
-        const git = new RemoteGit(server.url);
+        const git = new RemoteGit(server.url, { storeDir: `${root}/store` });
         const probed = unwrap(await git.probe());
         assertEquals(probed.supportsShallow, profile.expectShallow);
         assertEquals(probed.supportsFilterBlobNone, profile.expectFilter);
@@ -45,7 +45,7 @@ describe("RemoteGit compatibility", () => {
           new TextDecoder().decode(unwrap(await git.fetchBlob(file.sha))),
           "print(5)\n# TODO 5\n",
         );
-        assertEquals(git.getObject(file.sha)?.type, "blob");
+        assertEquals((await git.getObject(file.sha))?.type, "blob");
         const snapshot = unwrap(
           await git.fetchTreeForCommit("HEAD", {
             depth: 1,
@@ -53,9 +53,21 @@ describe("RemoteGit compatibility", () => {
           }),
         );
         const snapshotSrcTree = entryNamed(snapshot.entries, "src");
-        assertEquals(git.getObject(snapshotSrcTree.sha)?.type, "tree");
+        assertEquals((await git.getObject(snapshotSrcTree.sha))?.type, "tree");
         const cli = await new Deno.Command(Deno.execPath(), {
-          args: ["run", "--allow-net", "src/cli.ts", "list-files", server.url, "--ref", "HEAD"],
+          args: [
+            "run",
+            "--allow-net",
+            "--allow-read",
+            "--allow-write",
+            "src/cli.ts",
+            "--store-dir",
+            `${root}/cli-store`,
+            "list-files",
+            server.url,
+            "--ref",
+            "HEAD",
+          ],
           stdout: "piped",
           stderr: "piped",
         }).output();

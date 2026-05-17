@@ -14,7 +14,11 @@
 import { Result } from "better-result";
 import { TransportError } from "./errors.ts";
 import { Logger, NULL_LOGGER } from "./logger.ts";
-import type { GitProtocolOptions, HttpTransportResponse } from "./types.ts";
+import type {
+  GitProtocolOptions,
+  HttpFileTransportResponse,
+  HttpTransportResponse,
+} from "./types.ts";
 
 /** Sent verbatim as `User-Agent`. Git servers sometimes log this. */
 const USER_AGENT = "git/2.0 (git-remote-ops-deno)";
@@ -117,8 +121,9 @@ export async function getSmartHttp(
 export async function postUploadPack(
   url: string,
   body: Uint8Array,
+  destPath: string,
   options?: TransportContext,
-): Promise<Result<HttpTransportResponse, TransportError>> {
+): Promise<Result<HttpFileTransportResponse, TransportError>> {
   const logger = options?.logger ?? NULL_LOGGER;
   const requestUrl = `${trimUrl(url)}/git-upload-pack`;
   logger.debug(`POST git-upload-pack (${body.length}B, protocol=${options?.protocolVersion ?? 0})`);
@@ -145,19 +150,51 @@ export async function postUploadPack(
       }),
   });
   if (response.isErr()) return Result.err(response.error);
-  const read = await readResponse(response.value, "POST git-upload-pack", requestUrl);
-  const durationMs = performance.now() - start;
-  if (read.isOk()) {
-    logger.recordHttp({
-      bytesIn: read.value.body.length,
-      bytesOut: body.length,
-      durationMs,
-    });
-    logger.debug(
-      `POST git-upload-pack -> ${response.value.status}, ${read.value.body.length}B in ${
-        durationMs.toFixed(1)
-      }ms`,
+  if (!response.value.ok) {
+    return Result.err(
+      new TransportError({
+        method: "POST",
+        url: requestUrl,
+        status: response.value.status,
+        statusText: response.value.statusText,
+        message: `POST failed: ${response.value.status} ${response.value.statusText}`,
+      }),
     );
   }
-  return read;
+  if (!response.value.body) {
+    return Result.err(
+      new TransportError({
+        method: "POST",
+        url: requestUrl,
+        message: "POST git-upload-pack response had no body",
+      }),
+    );
+  }
+  const streamed = await Result.tryPromise({
+    try: async () => {
+      const file = await Deno.open(destPath, { create: true, write: true, truncate: true });
+      await response.value.body!.pipeTo(file.writable);
+      return (await Deno.stat(destPath)).size;
+    },
+    catch: (cause) =>
+      new TransportError({
+        method: "POST",
+        url: requestUrl,
+        message: "POST git-upload-pack failed writing response body",
+        cause,
+      }),
+  });
+  const durationMs = performance.now() - start;
+  if (streamed.isErr()) return Result.err(streamed.error);
+  logger.recordHttp({
+    bytesIn: streamed.value,
+    bytesOut: body.length,
+    durationMs,
+  });
+  logger.debug(
+    `POST git-upload-pack -> ${response.value.status}, ${streamed.value}B in ${
+      durationMs.toFixed(1)
+    }ms`,
+  );
+  return Result.ok({ path: destPath, length: streamed.value, status: response.value.status });
 }
