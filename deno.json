@@ -1,12 +1,26 @@
 {
-  "name": "git-remote-ops",
+  "name": "@goulinkh/git-remote-ops",
   "version": "0.1.0",
+  "license": "MIT",
   "exports": {
     ".": "./src/index.ts",
     "./cli": "./src/cli.ts"
   },
   "bin": {
     "git-remote-ops": "./src/cli.ts"
+  },
+  "publish": {
+    "include": [
+      "src/",
+      "README.md",
+      "AGENTS.md",
+      "LICENSE",
+      "deno.json"
+    ],
+    "exclude": [
+      "**/*.test.ts",
+      "src/testing/"
+    ]
   },
   "imports": {
     "@cliffy/command": "jsr:@cliffy/command@^1.1.0",
@@ -22,7 +36,10 @@
     "test": "deno test --allow-read src/objects src/pack src/protocol",
     "test:integration": "deno test --allow-run --allow-net --allow-read --allow-write --allow-env src/testing/integration",
     "test:all": "deno test --allow-run --allow-net --allow-read --allow-write --allow-env src",
-    "verify": "deno fmt --check && deno lint && deno check src/index.ts src/cli.ts"
+    "verify": "deno fmt --check && deno lint && deno check src/index.ts src/cli.ts",
+    "publish:jsr": "deno publish --allow-slow-types",
+    "publish:jsr:dry": "deno publish --dry-run --allow-dirty --allow-slow-types",
+    "build:npm": "deno run -A scripts/build_npm.ts"
   },
   "fmt": {
     "useTabs": false,
