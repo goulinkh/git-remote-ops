@@ -1,8 +1,8 @@
-#!/usr/bin/env -S deno run --allow-net --allow-read --allow-write
+#!/usr/bin/env node
 /**
  * @module cli
  *
- * Cliffy-driven command-line front-end. Each subcommand wires the global
+ * Commander-driven command-line front-end. Each subcommand wires the global
  * verbosity / stats flags into a freshly built {@link RemoteGit}, executes
  * one operation, and prints a plain-text result to stdout. Errors come back
  * through {@link unwrap} as `[Tag] message` lines on stderr with exit 1.
@@ -15,13 +15,13 @@
  *  - `list-files`  — walk a snapshot and emit every file path
  *  - `cat-blob`    — pipe one blob's raw bytes to stdout
  */
-import { Command, ValidationError } from "@cliffy/command";
+import { Command, InvalidArgumentError } from "commander";
 import type { Result } from "better-result";
-import { Logger, RemoteGit } from "./index.ts";
-import type { GitRemoteOpsError, LogLevel, TreeEntry } from "./index.ts";
-import { parseTree } from "./objects/index.ts";
+import { Logger, RemoteGit } from "./index.js";
+import type { GitRemoteOpsError, LogLevel, TreeEntry } from "./index.js";
+import { parseTree } from "./objects/index.js";
 
-/** Bumped in lockstep with `deno.json`. Surfaced by `git-remote-ops --version`. */
+/** Bumped in lockstep with `package.json`. Surfaced by `git-remote-ops --version`. */
 const VERSION = "0.1.0";
 /** Octal mode of a subtree entry — used to recurse during `list-files`. */
 const TREE_MODE = "40000";
@@ -53,7 +53,7 @@ function makeClient(url: string, flags: GlobalFlags): { client: RemoteGit; logge
 function unwrap<T>(result: Result<T, GitRemoteOpsError>): T {
   if (result.isErr()) {
     console.error(`[${result.error._tag}] ${result.error.message}`);
-    Deno.exit(1);
+    process.exit(1);
   }
   return result.value;
 }
@@ -66,16 +66,16 @@ async function cachedTreeEntries(client: RemoteGit, treeSha: string): Promise<Tr
   const object = await client.getObject(treeSha);
   if (!object) {
     console.error(`[ObjectNotFoundError] tree not present in fetched pack: ${treeSha}`);
-    Deno.exit(1);
+    process.exit(1);
   }
   if (object.type !== "tree") {
     console.error(`[ObjectDecodeError] object is not a tree: ${treeSha}`);
-    Deno.exit(1);
+    process.exit(1);
   }
   const entries = parseTree(object.content);
   if (entries.isErr()) {
     console.error(`[${entries.error._tag}] ${entries.error.message}`);
-    Deno.exit(1);
+    process.exit(1);
   }
   return entries.value;
 }
@@ -96,27 +96,41 @@ async function printCachedFiles(
   }
 }
 
-await new Command()
+function parseDepth(value: string): number {
+  const depth = Number(value);
+  if (!Number.isInteger(depth) || depth < 1) {
+    throw new InvalidArgumentError("--depth must be >= 1");
+  }
+  return depth;
+}
+
+function globalFlags(): GlobalFlags {
+  return program.opts<GlobalFlags>();
+}
+
+const program: Command = new Command()
   .name("git-remote-ops")
   .version(VERSION)
   .description("Read-only Git remote operations over smart HTTP.")
-  .globalOption("-q, --quiet", "Suppress all log output (silent level).")
-  .globalOption("-v, --verbose", "Enable debug-level logs to stderr.", {
-    conflicts: ["quiet"],
-  })
-  .globalOption("--debug", "Enable trace-level logs to stderr (very chatty).", {
-    conflicts: ["quiet"],
-  })
-  .globalOption("--store-dir <path:string>", "Directory for reusable loose-object cache.", {
-    required: true,
-  })
-  .globalOption("--stats", "Print performance/analytics summary on stderr after completion.")
-  .action(function () {
-    this.showHelp();
-  })
-  .command("probe", "Probe server capabilities (protocol, filter, shallow).")
-  .arguments("<url:string>")
-  .action(async (flags: GlobalFlags, url) => {
+  .showHelpAfterError()
+  .option("-q, --quiet", "Suppress all log output (silent level).")
+  .option("-v, --verbose", "Enable debug-level logs to stderr.")
+  .option("--debug", "Enable trace-level logs to stderr (very chatty).")
+  .requiredOption("--store-dir <path>", "Directory for reusable loose-object cache.")
+  .option("--stats", "Print performance/analytics summary on stderr after completion.")
+  .hook("preAction", (thisCommand) => {
+    const flags = thisCommand.optsWithGlobals<GlobalFlags>();
+    if (flags.quiet && (flags.verbose || flags.debug)) {
+      thisCommand.error("error: option '-q, --quiet' cannot be used with '-v, --verbose' or '--debug'");
+    }
+  });
+
+program
+  .command("probe")
+  .description("Probe server capabilities (protocol, filter, shallow).")
+  .argument("<url>")
+  .action(async (url: string, command: Command) => {
+    const flags = globalFlags();
     const { client, logger } = makeClient(url, flags);
     const profile = unwrap(await client.probe(true));
     console.log(`refs=${profile.refs.size}`);
@@ -125,85 +139,68 @@ await new Command()
     console.log(`filter_tree_0=${profile.supportsFilterTree0}`);
     console.log(`shallow=${profile.supportsShallow}`);
     maybeStats(logger, flags);
-  })
-  .command("ls-refs", "List remote refs as '<sha> <name>' per line.")
-  .arguments("<url:string>")
-  .action(async (flags: GlobalFlags, url) => {
+  });
+
+program
+  .command("ls-refs")
+  .description("List remote refs as '<sha> <name>' per line.")
+  .argument("<url>")
+  .action(async (url: string, command: Command) => {
+    const flags = globalFlags();
     const { client, logger } = makeClient(url, flags);
     for (const [name, sha] of unwrap(await client.lsRefs())) {
       console.log(`${sha} ${name}`);
     }
     maybeStats(logger, flags);
-  })
-  .command("cat-commit", "Fetch & print a commit object.")
-  .arguments("<url:string>")
-  .option("--ref <ref:string>", "Ref or sha to resolve.", { default: "HEAD" })
-  .option("--depth <n:integer>", "Shallow depth (ignored if server lacks shallow).", {
-    default: 1,
-    value: (n: number) => {
-      if (n < 1) throw new ValidationError("--depth must be >= 1");
-      return n;
-    },
-  })
-  .option("--filter <spec:string>", "Object filter spec (e.g. blob:none, tree:0).", {
-    default: "blob:none",
-  })
+  });
+
+program
+  .command("cat-commit")
+  .description("Fetch & print a commit object.")
+  .argument("<url>")
+  .option("--ref <ref>", "Ref or sha to resolve.", "HEAD")
+  .option("--depth <n>", "Shallow depth (ignored if server lacks shallow).", parseDepth, 1)
+  .option("--filter <spec>", "Object filter spec (e.g. blob:none, tree:0).", "blob:none")
   .option("--no-filter", "Fetch without object filter; may download a full snapshot pack.")
-  .action(
-    async (
-      flags: GlobalFlags & { ref: string; depth: number; filter: string | false },
-      url,
-    ) => {
-      const { client, logger } = makeClient(url, flags);
-      const filter = flags.filter === false ? undefined : flags.filter;
-      const { sha, commit } = unwrap(
-        await client.fetchCommit(flags.ref, { depth: flags.depth, filter }),
-      );
-      console.log(`commit ${sha}`);
-      console.log(`tree ${commit.tree}`);
-      if (commit.parent) console.log(`parent ${commit.parent}`);
-      if (commit.author) console.log(`author ${commit.author}`);
-      if (commit.committer) console.log(`committer ${commit.committer}`);
-      maybeStats(logger, flags);
-    },
-  )
-  .command(
-    "cat-tree",
-    "Fetch a commit snapshot and print its root tree as '<mode> <sha> <name>' per entry.",
-  )
-  .arguments("<url:string>")
-  .option("--ref <ref:string>", "Ref or commit sha to resolve.", { default: "HEAD" })
-  .option("--depth <n:integer>", "Shallow depth (ignored if server lacks shallow).", {
-    default: 1,
-    value: (n: number) => {
-      if (n < 1) throw new ValidationError("--depth must be >= 1");
-      return n;
-    },
-  })
-  .option("--filter <spec:string>", "Object filter spec (e.g. blob:none, tree:0).", {
-    default: "blob:none",
-  })
+  .action(async (url: string, options: { ref: string; depth: number; filter: string | false }) => {
+    const flags = globalFlags();
+    const { client, logger } = makeClient(url, flags);
+    const filter = options.filter === false ? undefined : options.filter;
+    const { sha, commit } = unwrap(
+      await client.fetchCommit(options.ref, { depth: options.depth, filter }),
+    );
+    console.log(`commit ${sha}`);
+    console.log(`tree ${commit.tree}`);
+    if (commit.parent) console.log(`parent ${commit.parent}`);
+    if (commit.author) console.log(`author ${commit.author}`);
+    if (commit.committer) console.log(`committer ${commit.committer}`);
+    maybeStats(logger, flags);
+  });
+
+program
+  .command("cat-tree")
+  .description("Fetch a commit snapshot and print its root tree as '<mode> <sha> <name>' per entry.")
+  .argument("<url>")
+  .option("--ref <ref>", "Ref or commit sha to resolve.", "HEAD")
+  .option("--depth <n>", "Shallow depth (ignored if server lacks shallow).", parseDepth, 1)
+  .option("--filter <spec>", "Object filter spec (e.g. blob:none, tree:0).", "blob:none")
   .option("--no-filter", "Fetch without object filter; downloads a full snapshot pack.")
-  .option("--tree-sha <sha:string>", "Fetch the tree by SHA directly (no commit snapshot).")
+  .option("--tree-sha <sha>", "Fetch the tree by SHA directly (no commit snapshot).")
   .action(
     async (
-      flags: GlobalFlags & {
-        ref: string;
-        depth: number;
-        filter: string | false;
-        treeSha?: string;
-      },
-      url,
+      url: string,
+      options: { ref: string; depth: number; filter: string | false; treeSha?: string },
     ) => {
+      const flags = globalFlags();
       const { client, logger } = makeClient(url, flags);
-      if (flags.treeSha) {
-        for (const entry of unwrap(await client.fetchTree(flags.treeSha))) {
+      if (options.treeSha) {
+        for (const entry of unwrap(await client.fetchTree(options.treeSha))) {
           console.log(`${entry.mode} ${entry.sha} ${entry.name}`);
         }
       } else {
-        const filter = flags.filter === false ? undefined : flags.filter;
+        const filter = options.filter === false ? undefined : options.filter;
         const result = unwrap(
-          await client.fetchTreeForCommit(flags.ref, { depth: flags.depth, filter }),
+          await client.fetchTreeForCommit(options.ref, { depth: options.depth, filter }),
         );
         for (const entry of result.entries) {
           console.log(`${entry.mode} ${entry.sha} ${entry.name}`);
@@ -211,49 +208,46 @@ await new Command()
       }
       maybeStats(logger, flags);
     },
-  )
-  .command("list-files", "List all files in a commit snapshot without cloning.")
-  .arguments("<url:string>")
-  .option("--ref <ref:string>", "Ref or commit sha to resolve.", { default: "HEAD" })
-  .option("--depth <n:integer>", "Shallow depth (ignored if server lacks shallow).", {
-    default: 1,
-    value: (n: number) => {
-      if (n < 1) throw new ValidationError("--depth must be >= 1");
-      return n;
-    },
-  })
-  .option("--filter <spec:string>", "Object filter spec (e.g. blob:none, tree:0).", {
-    default: "blob:none",
-  })
+  );
+
+program
+  .command("list-files")
+  .description("List all files in a commit snapshot without cloning.")
+  .argument("<url>")
+  .option("--ref <ref>", "Ref or commit sha to resolve.", "HEAD")
+  .option("--depth <n>", "Shallow depth (ignored if server lacks shallow).", parseDepth, 1)
+  .option("--filter <spec>", "Object filter spec (e.g. blob:none, tree:0).", "blob:none")
   .option("--no-filter", "Fetch without object filter; downloads a full snapshot pack.")
   .option("--details", "Print '<mode> <sha> <path>' instead of path only.")
   .action(
     async (
-      flags: GlobalFlags & {
-        ref: string;
-        depth: number;
-        filter: string | false;
-        details?: boolean;
-      },
-      url,
+      url: string,
+      options: { ref: string; depth: number; filter: string | false; details?: boolean },
     ) => {
+      const flags = globalFlags();
       const { client, logger } = makeClient(url, flags);
-      const filter = flags.filter === false ? undefined : flags.filter;
+      const filter = options.filter === false ? undefined : options.filter;
       const result = unwrap(
-        await client.fetchTreeForCommit(flags.ref, {
-          depth: flags.depth,
+        await client.fetchTreeForCommit(options.ref, {
+          depth: options.depth,
           filter,
         }),
       );
-      await printCachedFiles(client, result.entries, "", !!flags.details);
+      await printCachedFiles(client, result.entries, "", !!options.details);
       maybeStats(logger, flags);
     },
-  )
-  .command("cat-blob", "Fetch a blob and write raw bytes to stdout.")
-  .arguments("<url:string> <blob-sha:string>")
-  .action(async (flags: GlobalFlags, url, sha) => {
+  );
+
+program
+  .command("cat-blob")
+  .description("Fetch a blob and write raw bytes to stdout.")
+  .argument("<url>")
+  .argument("<blob-sha>")
+  .action(async (url: string, sha: string, command: Command) => {
+    const flags = globalFlags();
     const { client, logger } = makeClient(url, flags);
-    await Deno.stdout.write(unwrap(await client.fetchBlob(sha)));
+    process.stdout.write(unwrap(await client.fetchBlob(sha)));
     maybeStats(logger, flags);
-  })
-  .parse(Deno.args);
+  });
+
+await program.parseAsync(process.argv);

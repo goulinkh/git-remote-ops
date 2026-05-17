@@ -76,7 +76,7 @@ export interface RemoteGitOptions {
   /** Optional callback for low-level diagnostic strings (e.g. server stderr). */
   diagnostic?: DiagnosticFn;
   /** Inject a configured {@link Logger}; otherwise one is built from `diagnostic`. */
-  logger?: import("./logger.ts").Logger;
+  logger?: import("./logger.js").Logger;
 }
 
 /** Sink for free-form diagnostic strings. */

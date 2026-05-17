@@ -10,9 +10,9 @@
  *    `key[=args]` pkt-line per capability).
  */
 import { Result } from "better-result";
-import type { PktLineError } from "../errors.ts";
-import type { ParsedRefAdvertisement } from "../types.ts";
-import { parsePktLines } from "./pkt_line.ts";
+import type { PktLineError } from "../errors.js";
+import type { ParsedRefAdvertisement } from "../types.js";
+import { parsePktLines } from "./pkt_line.js";
 
 const decoder = new TextDecoder();
 

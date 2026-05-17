@@ -9,10 +9,9 @@
  * https://git-scm.com/docs/pack-format
  */
 import { Result } from "better-result";
-import { crypto } from "@std/crypto";
-import { encodeHex } from "@std/encoding/hex";
-import { PackParseError } from "../errors.ts";
-import type { GitObjectType } from "../types.ts";
+import { createHash } from "node:crypto";
+import { PackParseError } from "../errors.js";
+import type { GitObjectType } from "../types.js";
 
 /** Magic bytes opening every packfile: ASCII `"PACK"`. */
 export const PACK_SIGNATURE = new Uint8Array([0x50, 0x41, 0x43, 0x4b]);
@@ -84,5 +83,5 @@ export function sha1OfObject(
   const input = new Uint8Array(header.length + content.length);
   input.set(header);
   input.set(content, header.length);
-  return Result.ok(encodeHex(new Uint8Array(crypto.subtle.digestSync("SHA-1", input))));
+  return Result.ok(createHash("sha1").update(input).digest("hex"));
 }

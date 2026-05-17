@@ -1,2 +1,2 @@
-export * from "./commit.ts";
-export * from "./tree.ts";
+export * from "./commit.js";
+export * from "./tree.js";

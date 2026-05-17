@@ -1,3 +1,3 @@
-export * from "./objects.ts";
-export * from "./delta.ts";
-export * from "./parser.ts";
+export * from "./objects.js";
+export * from "./delta.js";
+export * from "./parser.js";

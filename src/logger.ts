@@ -73,12 +73,8 @@ function emptyMetrics(): Metrics {
 }
 
 function detectColor(): boolean {
-  try {
-    if (Deno.env.get("NO_COLOR")) return false;
-    return Deno.stderr.isTerminal();
-  } catch {
-    return false;
-  }
+  if (process.env.NO_COLOR) return false;
+  return process.stderr.isTTY;
 }
 
 /** Pretty-print a byte count with binary-prefix units. */
@@ -253,4 +249,4 @@ export class Logger {
 }
 
 /** Shared no-op logger. Use as a default when callers don't pass one in. */
-export const NULL_LOGGER = new Logger({ level: "silent", collectMetrics: false });
+export const NULL_LOGGER: Logger = new Logger({ level: "silent", collectMetrics: false });

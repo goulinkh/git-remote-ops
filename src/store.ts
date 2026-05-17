@@ -4,15 +4,25 @@
  * Disk-backed Git loose-object store.
  */
 import { Result } from "better-result";
+import { mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { deflateSync, inflateSync } from "node:zlib";
-import { ObjectDecodeError, ObjectNotFoundError, PackParseError } from "./errors.ts";
-import { sha1OfObject } from "./pack/objects.ts";
-import type { GitObject, GitObjectType } from "./types.ts";
+import { ObjectDecodeError, ObjectNotFoundError, PackParseError } from "./errors.js";
+import { sha1OfObject } from "./pack/objects.js";
+import type { GitObject, GitObjectType } from "./types.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const VALID_SHA = /^[0-9a-f]{40}$/;
 const VALID_TYPES = new Set<GitObjectType>(["commit", "tree", "blob", "tag"]);
+
+function isNotFound(cause: unknown): boolean {
+  return cause instanceof Error && "code" in cause && cause.code === "ENOENT";
+}
+
+function isAlreadyExists(cause: unknown): boolean {
+  return cause instanceof Error && "code" in cause && cause.code === "EEXIST";
+}
 
 export class LooseObjectStore {
   readonly rootDir: string;
@@ -25,9 +35,9 @@ export class LooseObjectStore {
     this.objectsDir = `${this.rootDir}/objects`;
     this.incomingDir = `${this.rootDir}/incoming`;
     this.snapshotsDir = `${this.rootDir}/snapshots`;
-    Deno.mkdirSync(this.objectsDir, { recursive: true });
-    Deno.mkdirSync(this.incomingDir, { recursive: true });
-    Deno.mkdirSync(this.snapshotsDir, { recursive: true });
+    mkdirSync(this.objectsDir, { recursive: true });
+    mkdirSync(this.incomingDir, { recursive: true });
+    mkdirSync(this.snapshotsDir, { recursive: true });
   }
 
   objectPath(sha: string): string {
@@ -46,10 +56,10 @@ export class LooseObjectStore {
   async has(sha: string): Promise<boolean> {
     if (!VALID_SHA.test(sha)) return false;
     try {
-      const stat = await Deno.stat(this.objectPath(sha));
-      return stat.isFile;
+      const info = await stat(this.objectPath(sha));
+      return info.isFile();
     } catch (cause) {
-      if (cause instanceof Deno.errors.NotFound) return false;
+      if (isNotFound(cause)) return false;
       throw cause;
     }
   }
@@ -57,25 +67,25 @@ export class LooseObjectStore {
   hasSync(sha: string): boolean {
     if (!VALID_SHA.test(sha)) return false;
     try {
-      return Deno.statSync(this.objectPath(sha)).isFile;
+      return statSync(this.objectPath(sha)).isFile();
     } catch (cause) {
-      if (cause instanceof Deno.errors.NotFound) return false;
+      if (isNotFound(cause)) return false;
       throw cause;
     }
   }
 
   async hasSnapshot(sha: string): Promise<boolean> {
     try {
-      const stat = await Deno.stat(this.snapshotPath(sha));
-      return stat.isFile;
+      const info = await stat(this.snapshotPath(sha));
+      return info.isFile();
     } catch (cause) {
-      if (cause instanceof Deno.errors.NotFound) return false;
+      if (isNotFound(cause)) return false;
       throw cause;
     }
   }
 
   async markSnapshot(sha: string): Promise<void> {
-    await Deno.writeTextFile(this.snapshotPath(sha), "", { create: true });
+    await writeFile(this.snapshotPath(sha), "", { flag: "w" });
   }
 
   async read(sha: string): Promise<Result<GitObject, ObjectNotFoundError | ObjectDecodeError>> {
@@ -83,7 +93,7 @@ export class LooseObjectStore {
       return Result.err(new ObjectNotFoundError({ sha, message: `object not found: ${sha}` }));
     }
     const bytes = await Result.tryPromise({
-      try: () => Deno.readFile(this.objectPath(sha)),
+      try: async () => new Uint8Array(await readFile(this.objectPath(sha))),
       catch: (cause) =>
         new ObjectDecodeError({
           reason: "malformed-object",
@@ -113,20 +123,20 @@ export class LooseObjectStore {
 
     const dir = `${this.objectsDir}/${sha.value.slice(0, 2)}`;
     const path = `${dir}/${sha.value.slice(2)}`;
-    Deno.mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true });
     const tmp = `${dir}/.${sha.value.slice(2)}.${crypto.randomUUID()}.tmp`;
     try {
-      Deno.writeFileSync(tmp, deflateSync(frameObject(type, content)));
+      writeFileSync(tmp, deflateSync(frameObject(type, content)));
       try {
-        Deno.renameSync(tmp, path);
+        renameSync(tmp, path);
       } catch (cause) {
-        if (cause instanceof Deno.errors.AlreadyExists) return Result.ok(sha.value);
+        if (isAlreadyExists(cause)) return Result.ok(sha.value);
         throw cause;
       }
       return Result.ok(sha.value);
     } catch (cause) {
       try {
-        Deno.removeSync(tmp);
+        rmSync(tmp, { force: true });
       } catch {
         // ignore best-effort temp cleanup
       }

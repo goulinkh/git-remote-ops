@@ -10,8 +10,8 @@
  * only ever walks toward the root snapshot).
  */
 import { Result } from "better-result";
-import { ObjectDecodeError } from "../errors.ts";
-import type { CommitInfo } from "../types.ts";
+import { ObjectDecodeError } from "../errors.js";
+import type { CommitInfo } from "../types.js";
 
 const decoder = new TextDecoder();
 

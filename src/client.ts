@@ -9,14 +9,15 @@
  * caller-supplied loose-object directory and deduped across calls by SHA.
  */
 import { Result } from "better-result";
-import type { GitRemoteOpsError } from "./errors.ts";
+import { readFile, rm } from "node:fs/promises";
+import type { GitRemoteOpsError } from "./errors.js";
 import {
   ObjectDecodeError,
   ObjectNotFoundError,
   PackParseError,
   RefNotFoundError,
-} from "./errors.ts";
-import { Logger } from "./logger.ts";
+} from "./errors.js";
+import { Logger } from "./logger.js";
 import type {
   CommitInfo,
   DiagnosticFn,
@@ -27,17 +28,17 @@ import type {
   RemoteGitOptions,
   ServerProfile,
   TreeEntry,
-} from "./types.ts";
-import { parseCommit, parseTree } from "./objects/index.ts";
-import { type ParsedPackfile, parsePackfile } from "./pack/index.ts";
+} from "./types.js";
+import { parseCommit, parseTree } from "./objects/index.js";
+import { type ParsedPackfile, parsePackfile } from "./pack/index.js";
 import {
   buildFetchRequest,
   extractPackToFile,
   parseRefAdvertisement,
   parseV2CapabilityAdvertisement,
-} from "./protocol/index.ts";
-import { LooseObjectStore } from "./store.ts";
-import { getSmartHttp, postUploadPack } from "./transport.ts";
+} from "./protocol/index.js";
+import { LooseObjectStore } from "./store.js";
+import { getSmartHttp, postUploadPack } from "./transport.js";
 
 /**
  * Capabilities offered on every v0 fetch unless overridden. `shallow` and
@@ -54,7 +55,7 @@ const DEFAULT_CAPS = [
   "multi_ack",
   "side-band-64k",
   "ofs-delta",
-  "agent=git-remote-ops-deno/0.1",
+  "agent=git-remote-ops/0.1",
 ];
 
 type PackFile = { path: string; length: number };
@@ -406,7 +407,7 @@ export class RemoteGit {
     sink?: Parameters<typeof parsePackfile>[2],
   ): Promise<Result<ParsedPackfile, GitRemoteOpsError>> {
     try {
-      const packBytes = await Deno.readFile(pack.path);
+      const packBytes = new Uint8Array(await readFile(pack.path));
       return parsePackfile(packBytes, options, sink);
     } catch (cause) {
       return fail(
@@ -522,9 +523,5 @@ export class RemoteGit {
 }
 
 async function removeIfExists(path: string): Promise<void> {
-  try {
-    await Deno.remove(path);
-  } catch (cause) {
-    if (!(cause instanceof Deno.errors.NotFound)) throw cause;
-  }
+  await rm(path, { force: true });
 }

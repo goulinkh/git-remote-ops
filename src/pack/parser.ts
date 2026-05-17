@@ -21,16 +21,15 @@
 import { Result } from "better-result";
 import zlib from "node:zlib";
 import { Buffer } from "node:buffer";
-import { encodeHex } from "@std/encoding/hex";
-import { PackParseError } from "../errors.ts";
+import { PackParseError } from "../errors.js";
 import type {
   GitObject,
   GitObjectMap,
   GitObjectType,
   PackObjectHeader,
   ReadResult,
-} from "../types.ts";
-import { applyDelta, readVarintBe } from "./delta.ts";
+} from "../types.js";
+import { applyDelta, readVarintBe } from "./delta.js";
 import {
   OBJ_NAMES,
   OBJ_OFS_DELTA,
@@ -44,7 +43,7 @@ import {
   SUPPORTED_PACK_VERSIONS,
   VARINT_CONTINUE,
   VARINT_VALUE_MASK,
-} from "./objects.ts";
+} from "./objects.js";
 
 /** Mask for the 3-bit object type field in the first header byte. */
 const TYPE_FIELD_MASK = 0x07;
@@ -372,7 +371,7 @@ export function parsePackfile(
           }),
         );
       }
-      const baseSha = encodeHex(pack.subarray(offset, offset + REF_DELTA_SHA_SIZE));
+      const baseSha = Buffer.from(pack.subarray(offset, offset + REF_DELTA_SHA_SIZE)).toString("hex");
       offset += REF_DELTA_SHA_SIZE;
       const result = decompressAt(pack, offset, header.value.size);
       if (result.isErr()) return Result.err(result.error);

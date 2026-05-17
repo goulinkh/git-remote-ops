@@ -11,68 +11,84 @@
  * A `cause` field, when present, is the underlying thrown value preserved
  * for `Error.cause`-style chaining.
  */
-import { TaggedError } from "better-result";
+import { TaggedError, type TaggedErrorClass } from "better-result";
 
-/** Anything that goes wrong while parsing a packfile or applying a delta. */
-export class PackParseError extends TaggedError("PackParseError")<{
+const PackParseErrorBase: TaggedErrorClass<"PackParseError", {
   reason: string;
   message: string;
   offset?: number;
   cause?: unknown;
-}>() {}
+}> = TaggedError("PackParseError")();
 
-/** Raised when a commit/tree body fails structural validation. */
-export class ObjectDecodeError extends TaggedError("ObjectDecodeError")<{
+/** Anything that goes wrong while parsing a packfile or applying a delta. */
+export class PackParseError extends PackParseErrorBase {}
+
+const ObjectDecodeErrorBase: TaggedErrorClass<"ObjectDecodeError", {
   reason: string;
   message: string;
   objectType?: string;
   sha?: string;
   cause?: unknown;
-}>() {}
+}> = TaggedError("ObjectDecodeError")();
 
-/** Malformed pkt-line framing (bad length prefix or truncation). */
-export class PktLineError extends TaggedError("PktLineError")<{
+/** Raised when a commit/tree body fails structural validation. */
+export class ObjectDecodeError extends ObjectDecodeErrorBase {}
+
+const PktLineErrorBase: TaggedErrorClass<"PktLineError", {
   reason: string;
   message: string;
   offset?: number;
   cause?: unknown;
-}>() {}
+}> = TaggedError("PktLineError")();
 
-/** Server returned a `git-upload-pack` response we couldn't interpret. */
-export class UploadPackError extends TaggedError("UploadPackError")<{
+/** Malformed pkt-line framing (bad length prefix or truncation). */
+export class PktLineError extends PktLineErrorBase {}
+
+const UploadPackErrorBase: TaggedErrorClass<"UploadPackError", {
   reason: string;
   message: string;
   cause?: unknown;
-}>() {}
+}> = TaggedError("UploadPackError")();
 
-/** Anything HTTP — network failure, non-2xx status, body-read error. */
-export class TransportError extends TaggedError("TransportError")<{
+/** Server returned a `git-upload-pack` response we couldn't interpret. */
+export class UploadPackError extends UploadPackErrorBase {}
+
+const TransportErrorBase: TaggedErrorClass<"TransportError", {
   method: string;
   url: string;
   message: string;
   status?: number;
   statusText?: string;
   cause?: unknown;
-}>() {}
+}> = TaggedError("TransportError")();
 
-/** The requested ref didn't appear in the server's advertisement. */
-export class RefNotFoundError extends TaggedError("RefNotFoundError")<{
+/** Anything HTTP — network failure, non-2xx status, body-read error. */
+export class TransportError extends TransportErrorBase {}
+
+const RefNotFoundErrorBase: TaggedErrorClass<"RefNotFoundError", {
   ref: string;
   message: string;
-}>() {}
+}> = TaggedError("RefNotFoundError")();
 
-/** An object referenced by sha wasn't present in the materialized store. */
-export class ObjectNotFoundError extends TaggedError("ObjectNotFoundError")<{
+/** The requested ref didn't appear in the server's advertisement. */
+export class RefNotFoundError extends RefNotFoundErrorBase {}
+
+const ObjectNotFoundErrorBase: TaggedErrorClass<"ObjectNotFoundError", {
   sha: string;
   message: string;
-}>() {}
+}> = TaggedError("ObjectNotFoundError")();
 
-/** Tree-walk couldn't reach the requested path. */
-export class PathNotFoundError extends TaggedError("PathNotFoundError")<{
+/** An object referenced by sha wasn't present in the materialized store. */
+export class ObjectNotFoundError extends ObjectNotFoundErrorBase {}
+
+const PathNotFoundErrorBase: TaggedErrorClass<"PathNotFoundError", {
   path: string;
   message: string;
   treeSha?: string;
-}>() {}
+}> = TaggedError("PathNotFoundError")();
+
+/** Tree-walk couldn't reach the requested path. */
+export class PathNotFoundError extends PathNotFoundErrorBase {}
 
 /** Discriminated union of every error this library returns. */
 export type GitRemoteOpsError =

@@ -12,16 +12,17 @@
  * record timing / byte counts onto the supplied {@link Logger}.
  */
 import { Result } from "better-result";
-import { TransportError } from "./errors.ts";
-import { Logger, NULL_LOGGER } from "./logger.ts";
+import { writeFile } from "node:fs/promises";
+import { TransportError } from "./errors.js";
+import { Logger, NULL_LOGGER } from "./logger.js";
 import type {
   GitProtocolOptions,
   HttpFileTransportResponse,
   HttpTransportResponse,
-} from "./types.ts";
+} from "./types.js";
 
 /** Sent verbatim as `User-Agent`. Git servers sometimes log this. */
-const USER_AGENT = "git/2.0 (git-remote-ops-deno)";
+const USER_AGENT = "git/2.0 (git-remote-ops)";
 
 /** Per-request transport context: protocol version + optional logger. */
 export interface TransportContext extends GitProtocolOptions {
@@ -172,9 +173,9 @@ export async function postUploadPack(
   }
   const streamed = await Result.tryPromise({
     try: async () => {
-      const file = await Deno.open(destPath, { create: true, write: true, truncate: true });
-      await response.value.body!.pipeTo(file.writable);
-      return (await Deno.stat(destPath)).size;
+      const bytes = new Uint8Array(await response.value.arrayBuffer());
+      await writeFile(destPath, bytes);
+      return bytes.length;
     },
     catch: (cause) =>
       new TransportError({

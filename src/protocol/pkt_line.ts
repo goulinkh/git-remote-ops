@@ -8,8 +8,8 @@
  * Spec: https://git-scm.com/docs/protocol-common
  */
 import { Result } from "better-result";
-import { PktLineError } from "../errors.ts";
-import type { PktLine } from "../types.ts";
+import { PktLineError } from "../errors.js";
+import type { PktLine } from "../types.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();

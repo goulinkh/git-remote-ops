@@ -11,9 +11,9 @@
  * Delta format spec: https://git-scm.com/docs/pack-format#_deltified_representation
  */
 import { Result } from "better-result";
-import { PackParseError } from "../errors.ts";
-import type { ReadResult } from "../types.ts";
-import { VARINT_CONTINUE, VARINT_VALUE_MASK } from "./objects.ts";
+import { PackParseError } from "../errors.js";
+import type { ReadResult } from "../types.js";
+import { VARINT_CONTINUE, VARINT_VALUE_MASK } from "./objects.js";
 
 /** Bits of payload per varint byte. */
 const VARINT_VALUE_BITS = 7;

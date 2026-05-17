@@ -5,10 +5,10 @@
  * {@link Logger}, every {@link GitRemoteOpsError} subclass, and the shared
  * type vocabulary. The CLI ships separately under `./cli`.
  */
-export { RemoteGit } from "./client.ts";
-export { Logger, NULL_LOGGER } from "./logger.ts";
-export { LooseObjectStore } from "./store.ts";
-export type { LoggerOptions, LogLevel, Metrics } from "./logger.ts";
+export { RemoteGit } from "./client.js";
+export { Logger, NULL_LOGGER } from "./logger.js";
+export { LooseObjectStore } from "./store.js";
+export type { LoggerOptions, LogLevel, Metrics } from "./logger.js";
 export {
   ObjectDecodeError,
   ObjectNotFoundError,
@@ -18,8 +18,8 @@ export {
   RefNotFoundError,
   TransportError,
   UploadPackError,
-} from "./errors.ts";
-export type { GitRemoteOpsError } from "./errors.ts";
+} from "./errors.js";
+export type { GitRemoteOpsError } from "./errors.js";
 export type {
   CommitInfo,
   DiagnosticFn,
@@ -30,4 +30,4 @@ export type {
   RemoteGitOptions,
   ServerProfile,
   TreeEntry,
-} from "./types.ts";
+} from "./types.js";

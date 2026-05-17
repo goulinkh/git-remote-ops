@@ -9,9 +9,8 @@
  * leaf by {@link walkTree}.
  */
 import { Result } from "better-result";
-import { encodeHex } from "@std/encoding/hex";
-import { ObjectDecodeError, PathNotFoundError } from "../errors.ts";
-import type { GitObjectMap, TreeEntry } from "../types.ts";
+import { ObjectDecodeError, PathNotFoundError } from "../errors.js";
+import type { GitObjectMap, TreeEntry } from "../types.js";
 
 interface FileEntry {
   mode: string;
@@ -63,7 +62,7 @@ export function parseTree(content: Uint8Array): Result<TreeEntry[], ObjectDecode
     entries.push({
       mode: decoder.decode(content.subarray(offset, space)),
       name: decoder.decode(content.subarray(space + 1, nul)),
-      sha: encodeHex(content.subarray(nul + 1, nul + 1 + SHA_BYTES)),
+      sha: Buffer.from(content.subarray(nul + 1, nul + 1 + SHA_BYTES)).toString("hex"),
     });
     offset = nul + 1 + SHA_BYTES;
   }
